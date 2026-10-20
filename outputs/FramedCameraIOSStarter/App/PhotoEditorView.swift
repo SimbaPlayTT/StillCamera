@@ -172,13 +172,15 @@ struct PhotoEditorView: View {
             defer { busy = false }
             do {
                 let image = try await PhotoRenderer.shared.render(entry, recipe: exportRecipe, maximumSide: nil)
-                guard let data = image.jpegData(compressionQuality: 0.95) else { throw LibraryError.invalidImage }
+                guard let data = await Task.detached(priority: .userInitiated, operation: {
+                    image.jpegData(compressionQuality: 0.95)
+                }).value else { throw LibraryError.invalidImage }
                 if save {
                     try await PhotosWriter.save(data: data, date: entry.metadata.date)
                     status = "Saved to Photos."
                 } else {
                     let url = FileManager.default.temporaryDirectory.appendingPathComponent("Still-\(entry.id.uuidString).jpg")
-                    try data.write(to: url, options: .atomic)
+                    try await Task.detached(priority: .userInitiated) { try data.write(to: url, options: .atomic) }.value
                     files = ShareFiles(urls: [url])
                 }
                 var updated = entry; updated.recipe = recipe; try await store.update(updated)

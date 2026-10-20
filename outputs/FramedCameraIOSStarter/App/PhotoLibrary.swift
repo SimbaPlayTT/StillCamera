@@ -2,6 +2,7 @@ import SwiftUI
 import Photos
 import ImageIO
 import UniformTypeIdentifiers
+import CoreImage
 
 struct EditRecipe: Codable, Hashable {
     var aspect: CaptureAspect = .standard
@@ -94,6 +95,19 @@ final class PhotoLibraryStore: ObservableObject {
             if let text = exif[kCGImagePropertyExifDateTimeOriginal] as? String, let date = formatter.date(from: text) { metadata.date = date }
             metadata.focalLength = exif[kCGImagePropertyExifFocalLength] as? Double ?? 0
             metadata.exposure = exif[kCGImagePropertyExifExposureTime] as? Double ?? 0
+        }
+        if ext.lowercased() == "dng" {
+            let preview = try await Task.detached(priority: .userInitiated) {
+                guard var image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { throw LibraryError.invalidImage }
+                let scale = min(1, 1600 / max(image.extent.width, image.extent.height))
+                image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                let context = CIContext(options: [.cacheIntermediates: false])
+                guard let cg = context.createCGImage(image, from: image.extent),
+                      let preview = UIImage(cgImage: cg).jpegData(compressionQuality: 0.9) else { throw LibraryError.invalidImage }
+                return preview
+            }.value
+            return try await add(CapturedPhoto(processedData: preview, rawData: data,
+                processedFileExtension: "jpg", metadata: metadata, aspect: .standard))
         }
         return try await add(CapturedPhoto(processedData: data, rawData: nil,
             processedFileExtension: ext, metadata: metadata, aspect: .standard))

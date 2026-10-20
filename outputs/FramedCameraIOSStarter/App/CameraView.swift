@@ -43,7 +43,8 @@ struct CameraView: View {
         }
         let center = bounds.map { CGPoint(x: $0.midX / unit.width, y: $0.midY) }
         return CompositionObservation(subjectBounds: bounds, subjectCenter: center, horizonAngle: camera.horizonAngle,
-            suggestedAdjustment: abs(camera.horizonAngle) > 0.06 ? "Level the camera." : CompositionCoach.heuristic(for: center),
+            suggestedAdjustment: bounds == nil ? camera.compositionObservation.suggestedAdjustment :
+                abs(camera.horizonAngle) > 0.06 ? "Level the camera." : CompositionCoach.heuristic(for: center),
             detectedFace: camera.compositionObservation.detectedFace, detectedPose: camera.compositionObservation.detectedPose)
     }
     private var aligned: Bool {
@@ -78,17 +79,9 @@ struct CameraView: View {
             else if phase != .active { cancelWork(); camera.stop() }
         }
         .onChange(of: camera.supportsRaw) { _, raw in if !raw { format = CaptureFormat.heif.rawValue } }
+        .onChange(of: camera.currentZoomFactor) { _, _ in coachTask?.cancel(); coachText = nil }
         .onChange(of: camera.capturedPhoto?.id) { _, id in
-            guard id != nil, let photo = camera.capturedPhoto else { return }
-            storingCapture = true
-            Task {
-                do {
-                    let entry = try await library.add(photo)
-                    camera.clearCapturedPhoto()
-                    present(.editor(entry))
-                } catch { library.error = error.localizedDescription }
-                storingCapture = false
-            }
+            if id != nil { keepCapture() }
         }
         .sheet(item: $sheet, onDismiss: resume) { value in
             switch value {
@@ -104,6 +97,7 @@ struct CameraView: View {
             if !$0 { camera.dismissMessage(); library.error = nil }
         })) {
             Button("OK") { camera.dismissMessage(); library.error = nil }
+            if camera.capturedPhoto != nil && !storingCapture { Button("Retry keeping photo") { keepCapture() } }
             if camera.phase == .failed { Button("Retry") { camera.start() } }
         } message: { Text(camera.message ?? library.error ?? "") }
     }
@@ -298,6 +292,18 @@ struct CameraView: View {
     private func capture() {
         haptic()
         camera.capturePhoto(format: CaptureFormat(rawValue: format) ?? .heif, preferProRAW: proRAW, flashMode: flash, aspect: aspect)
+    }
+    private func keepCapture() {
+        guard let photo = camera.capturedPhoto, !storingCapture else { return }
+        storingCapture = true
+        Task {
+            do {
+                let entry = try await library.add(photo)
+                camera.clearCapturedPhoto()
+                present(.editor(entry))
+            } catch { library.error = error.localizedDescription }
+            storingCapture = false
+        }
     }
     private func switchCamera() {
         guard ready else { return }

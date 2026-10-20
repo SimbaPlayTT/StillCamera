@@ -33,13 +33,14 @@ actor PhotoRenderer {
             "inputTargetNeutral": CIVector(x: 6500 + r["temperature"] * 2200, y: r["tint"] * 80)])
         image = filter("CIColorControls", image, ["inputContrast": 1 + r["contrast"] * 0.4,
             "inputSaturation": max(0, 1 + r["saturation"])])
-        image = filter("CIHighlightShadowAdjust", image, ["inputHighlightAmount": 1 - r["highlights"] * 0.65,
+        image = filter("CIHighlightShadowAdjust", image, ["inputHighlightAmount": 1 + min(0, r["highlights"]) * 0.65,
             "inputShadowAmount": r["shadows"] * 0.7])
         var curveParameters: [String: Any] = [:]
         for i in 0..<5 {
             var y = r.curve[i]
             if i == 0 { y += r["blacks"] * 0.13 + r["fade"] * 0.18 }
             if i == 4 { y += r["whites"] * 0.16 }
+            if i == 3 { y += max(0, r["highlights"]) * 0.12 }
             curveParameters["inputPoint\(i)"] = CIVector(x: CGFloat(i) / 4, y: min(max(y, 0), 1))
         }
         image = filter("CIToneCurve", image, curveParameters)
@@ -62,7 +63,8 @@ actor PhotoRenderer {
             let grain = filter("CIColorMatrix", noise, ["inputRVector": CIVector(x: 0.3, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0.3, y: 0, z: 0, w: 0), "inputBVector": CIVector(x: 0.3, y: 0, z: 0, w: 0),
                 "inputAVector": CIVector(x: 0, y: 0, z: 0, w: r["grain"] * 0.35)])
-            image = filter("CISoftLightBlendMode", grain.cropped(to: extent), [kCIInputBackgroundImageKey: image])
+            let centeredGrain = filter("CIColorMatrix", grain, ["inputBiasVector": CIVector(x: 0.35, y: 0.35, z: 0.35, w: 0)])
+            image = filter("CISoftLightBlendMode", centeredGrain.cropped(to: extent), [kCIInputBackgroundImageKey: image])
         }
         if r["leak"] > 0, let gradient = CIFilter(name: "CIRadialGradient", parameters: [
             "inputCenter": CIVector(x: extent.width * 0.05, y: extent.height * 0.7),

@@ -61,6 +61,22 @@ final class CameraSafetyTests: XCTestCase {
     }
 
     @MainActor
+    func testExposureAdjustmentChangesRenderedImage() async throws {
+        let photo = LibraryPhoto(id: UUID(), sourceExtension: "png", hasRaw: false, metadata: PhotoMetadata(), recipe: EditRecipe())
+        try FileManager.default.createDirectory(at: photo.directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: photo.directory) }
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 60, height: 80)).image { context in
+            UIColor(white: 0.3, alpha: 1).setFill(); context.fill(CGRect(x: 0, y: 0, width: 60, height: 80))
+        }
+        try XCTUnwrap(image.pngData()).write(to: photo.originalURL)
+        let baseline = try await PhotoRenderer.shared.render(photo, recipe: EditRecipe(), maximumSide: 80)
+        var brighter = EditRecipe(); brighter["exposure"] = 1
+        let changed = try await PhotoRenderer.shared.render(photo, recipe: brighter, maximumSide: 80)
+        XCTAssertEqual(baseline.size, changed.size)
+        XCTAssertNotEqual(baseline.pngData(), changed.pngData(), "Exposure must alter rendered image data")
+    }
+
+    @MainActor
     func testRendererExportsEffectsAndFramesWithoutChangingOriginal() async throws {
         let photo = LibraryPhoto(id: UUID(), sourceExtension: "png", hasRaw: false, metadata: PhotoMetadata(), recipe: EditRecipe())
         try FileManager.default.createDirectory(at: photo.directory, withIntermediateDirectories: true)

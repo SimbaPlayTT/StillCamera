@@ -130,6 +130,7 @@ final class CameraService: NSObject, ObservableObject {
         analysisEnabled = enabled
         if !enabled { requestedTarget = nil; targetRevision += 1 }
         analysisLock.unlock()
+        sessionQueue.async { [weak self] in self?.videoOutput.connection(with: .video)?.isEnabled = enabled }
         if !enabled { DispatchQueue.main.async { self.compositionObservation = .neutral } }
     }
 
@@ -265,6 +266,15 @@ final class CameraService: NSObject, ObservableObject {
                     iso: Double(device.iso), exposure: CMTimeGetSeconds(device.exposureDuration)))
             self.transition(.capturing)
             self.photoOutput.capturePhoto(with: settings, delegate: self)
+            let captureID = settings.uniqueID
+            self.sessionQueue.asyncAfter(deadline: .now() + 30) { [weak self] in
+                guard let self, self.pending?.id == captureID else { return }
+                self.pending = nil
+                self.turnTorchOff()
+                if self.session.isRunning { self.session.stopRunning() }
+                self.transition(.failed)
+                self.notice("Capture timed out. Your previous photos are safe. Tap Retry to restart the camera.")
+            }
         }
     }
 
@@ -366,9 +376,15 @@ final class CameraService: NSObject, ObservableObject {
                 connection.isVideoMirrored = device.position == .front
             }
         }
+        analysisLock.lock()
+        let deliverFrames = analysisEnabled
+        analysisLock.unlock()
+        videoOutput.connection(with: .video)?.isEnabled = deliverFrames
         observations = [device.observe(\.isTorchActive, options: [.new]) { [weak self] _, _ in
             self?.sessionQueue.async { self?.publishCapabilities() }
         }, device.observe(\.isTorchAvailable, options: [.new]) { [weak self] _, _ in
+            self?.sessionQueue.async { self?.publishCapabilities() }
+        }, device.observe(\.activePrimaryConstituentDevice, options: [.new]) { [weak self] _, _ in
             self?.sessionQueue.async { self?.publishCapabilities() }
         }]
         publishCapabilities()
@@ -474,6 +490,10 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
             if raw { self.pending?.raw = data } else {
                 self.pending?.processed = data
                 if let exif = metadata[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+                    if let values = exif[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber], let iso = values.first {
+                        self.pending?.metadata.iso = iso.doubleValue
+                    }
+                    if let lens = exif[kCGImagePropertyExifLensModel as String] as? String { self.pending?.metadata.lens = lens }
                     self.pending?.metadata.focalLength = exif[kCGImagePropertyExifFocalLength as String] as? Double ?? 0
                     if let exposure = exif[kCGImagePropertyExifExposureTime as String] as? Double {
                         self.pending?.metadata.exposure = exposure

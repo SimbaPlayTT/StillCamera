@@ -47,7 +47,14 @@ final class DepthSession: NSObject, ObservableObject, ARSessionDelegate {
     override init() { super.init(); session.delegate = self; session.delegateQueue = queue }
     func start() {
         guard Self.supported else { message = "LiDAR scene depth is unavailable on this device."; return }
+        guard ProcessInfo.processInfo.thermalState != .critical else {
+            message = "Let the iPhone cool down before using depth assistance."; return
+        }
+        queue.async { self.filteredDistance = nil; self.lastTimestamp = 0 }
         let configuration = ARWorldTrackingConfiguration()
+        if let format = ARWorldTrackingConfiguration.supportedVideoFormats.first(where: { $0.framesPerSecond == 30 }) {
+            configuration.videoFormat = format
+        }
         configuration.planeDetection = [.horizontal, .vertical]
         configuration.frameSemantics = ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) ? .smoothedSceneDepth : .sceneDepth
         session.run(configuration)

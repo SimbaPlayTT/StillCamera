@@ -35,7 +35,7 @@ References rechecked October 20, 2026: [Framed website](https://shootframed.com/
 | Color | HSL, grading, curves, calibration | Six-channel HSL color cube; shadow/highlight hues and strengths; five-point tone curve; RGB gain calibration. Sensor-specific profiles and per-channel curves are not implemented. |
 | Effects | Film and optical effects | Grain, bloom-based halation approximation, glow, leaks, procedural scratches/dust, motion blur and vignette. Not a calibrated physical film/halation model. |
 | Finish | Border variants, date and capture details | Plain/white/paper-toned/black/negative/specs frames; capture-date stamp and metadata captions. Paper texture simulation is not implemented. |
-| Library and export | Persistent edits, import, Photos and sharing | Local originals plus RAW and JSON edit recipes; PhotosPicker import; full-size edit/original export; system share sheet. Share destinations depend on installed apps. DNG import is currently treated as an imported source rather than a paired RAW asset. |
+| Library and export | Persistent edits, import, Photos and sharing | Local originals plus RAW and JSON edit recipes; PhotosPicker import (including DNG with a derived preview); full-size edit/original export; system share sheet. Share destinations depend on installed apps. |
 | Apple Intelligence | Still addition | Optional Foundation Models text suggestions, runtime availability checks and Vision fallback. No third-party cloud calls. |
 | Depth assistance | Still addition | Capability-gated ARKit LiDAR center-distance measurement, confidence checks, smoothing and plane-status feedback, in a separate camera mode. No RAW capture inside AR mode. Front TrueDepth, 3D target placement and reconstructed viewpoint coaching are not implemented. |
 
@@ -43,7 +43,7 @@ References rechecked October 20, 2026: [Framed website](https://shootframed.com/
 
 ## Automated verification
 
-The workflow archives a physical-device app, runs seven simulator checks covering operation gating, zoom capability examples, invalid zoom, crop transforms, aspect ratios, recipe persistence and the image-effects/export pipeline, then launches the simulator app and uploads a screenshot. Archive/test logs and xcresult bundles are uploaded even on failure. The IPA is packaged only after checks succeed.
+The workflow archives a physical-device app, runs eight simulator checks covering operation gating, zoom capability examples, invalid zoom, crop transforms, aspect ratios, recipe persistence, actual exposure changes and the image-effects/export pipeline, then launches the simulator app and uploads a screenshot. Archive/test logs and xcresult bundles are uploaded even on failure. The IPA is packaged only after checks succeed.
 
 Simulator camera-unavailable startup and a still-image rendering test do not verify actual camera hardware, photo formats, flash/torch, tracking accuracy, AR depth, model availability, sustained frame rate, battery use or heat.
 

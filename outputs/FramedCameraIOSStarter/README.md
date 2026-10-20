@@ -1,47 +1,48 @@
-# Still — native iOS camera
+# Still — native camera and photo library
 
-This project is a native SwiftUI camera app. It uses AVFoundation for the live viewfinder and photo capture, Vision for on-device framing analysis, and PhotoKit to save captures. The camera interface uses restrained black controls, tactile feedback, a level indicator, subject framing marks, and a rule-of-thirds grid.
+Still is a SwiftUI / AVFoundation iPhone app. Version 1.1 repairs the camera configuration, replaces the crowded prototype layout, adds a persistent photo library and adjustable editor, and introduces optional LiDAR depth assistance.
 
-## Compatibility
+**Requested physical target: iPhone 17 Pro Max on iOS 27.0.** Minimum iOS remains 18. Apple Intelligence uses runtime availability checks (iOS 26+ and an eligible, ready model); Vision guidance works without it.
 
-- Minimum deployment target: iOS 18.
-- The UI, AVFoundation camera, Vision composition guides, RAW/HEIF capture fallback, and Photos saving are designed for iOS 18 and later.
-- Apple Foundation Models are optional and require iOS 26 or later plus Apple Intelligence availability. On iOS 18 or when the model is unavailable, the Vision-based composition cue remains available.
-- Device capabilities are checked at runtime. On a supported triple-camera device, Still uses the virtual triple-camera input so iOS can switch physical lenses at zoom stops. Other devices fall back to the rear wide-angle camera.
+Read [REPAIR-NOTES.md](REPAIR-NOTES.md) for established defects, the source-grounded Framed comparison, implementation limits and the device checklist. Hardware behavior on iOS 27.0 is not certified by simulator tests.
 
-## Project contents
+## Camera
 
-- `App/CameraService.swift` — serial AVFoundation session configuration, camera permissions, triple/wide camera selection, lens zoom, tap focus/exposure, flash, HEIF/JPEG and RAW/ProRAW capture, runtime errors, motion leveling, Vision frame delivery, and Photos saving.
-- `App/CameraView.swift` — the live viewfinder, grid, horizon indicator, focus reticle, framing guidance, capture review, and recent capture screen.
-- `App/CameraControlsOverlay.swift` — black ergonomic controls, exposure compensation, flash/format/settings, guide and grid switches, swipeable zoom presets, haptics, and shutter.
-- `App/CameraPreview.swift` — `AVCaptureVideoPreviewLayer` bridge with tap-to-focus coordinate conversion.
-- `App/CompositionCoach.swift` — on-device saliency, face, pose, and rectangle analysis. When enabled and available, Foundation Models turns coarse measurements into a short cue; it receives no image.
-- `App/SettingsView.swift` — the requested Apple Intelligence toggle, capture format, ProRAW preference, grid, haptics, and privacy details.
-- `App/Info.plist` — camera and photo-library usage descriptions plus iPhone requirements.
-- `project.yml` — XcodeGen project specification, target, bundle identifier, assets, and iOS deployment target.
-- Workspace `.github/workflows/build-ipa.yml` — GitHub Actions workflow that generates an Xcode project on a macOS runner, archives the iOS app without signing, packages an unsigned `.ipa`, and uploads it as an artifact.
+- Compact top row: capture flash, continuous torch, crop, format and Settings.
+- Runtime lens presets; pinch or swipe to zoom. Virtual hardware factors are converted to wide-camera 1x. The displayed presets reflect actual constituents rather than a fixed 0.5/1/2/5 list.
+- Tap to focus/expose, hold for AE/AF lock. Open the sliders button for exposure compensation, manual ISO/shutter, timer and Grid.
+- Flash On fires during capture. The flashlight button controls continuous LED illumination. Torch shuts down before camera switching, backgrounding or AR handoff.
+- RAW/ProRAW appears only when the active output supports it. HEIF falls back to JPEG if HEVC is unavailable.
+- 3:4, 4:5, square and 9:16 export crops preserve the original.
+- Guide uses local Vision detection/tracking and corrected camera-motion cues. Select allows drawing a region, moving it and resizing its lower-right corner. The shutter outline turns yellow near a thirds alignment with a level horizon.
+- Optional Apple Intelligence wording is requested with the refresh button; photo pixels are not sent to the language model.
 
-## Build on GitHub Actions from Windows
+## Develop and keep
 
-The workflow lives at the workspace repository path `.github/workflows/build-ipa.yml` and builds `outputs/FramedCameraIOSStarter`. Commit and push both the project folder and the workflow to a GitHub repository, then run **Build unsigned Still iOS IPA** from the Actions tab or push a change to the project. Download the `StillCamera-unsigned-ipa` artifact from the completed workflow.
+Captures are saved in Still's private library before the editor opens. Import uses the system Photos picker. The library retains original bytes, a paired DNG where captured, metadata, thumbnails and separate edit recipes.
 
-The workflow uses `macos-latest`, installs XcodeGen, runs `xcodegen generate`, archives with `CODE_SIGNING_ALLOWED=NO` and `CODE_SIGNING_REQUIRED=NO`, then packages `Payload/Still.app` into `StillCamera-unsigned.ipa`.
+The editor provides original looks, tonal adjustments, white balance, six-channel HSL, split grading, tone curves, RGB calibration, texture/optical effects, crop, borders and a capture-date stamp. Halation is a bloom approximation. Paper is a border tone rather than a paper-texture simulation.
 
-## Install on a physical iPhone
+Use the editor's menu to export an edit, share it, save original+RAW, share original files, reset edits or delete from Still. Local edits can be reopened after restarting the app. Library photos are removed if the app is deleted.
 
-The workflow intentionally creates an **unsigned** IPA. It is not ready to install directly on an iPhone. Import it into a sideloading tool such as AltStore or SideStore to sign it with a provisioning profile, or configure a signing workflow with your Apple Developer credentials. A free Apple development signing profile generally expires and needs refreshing. TrollStore only works on specific iOS versions and devices; the artifact itself does not make a phone eligible.
+## Depth assistance
 
-For a local Mac build, open `project.yml` in the project directory, run `xcodegen generate`, then open the generated `StillCamera.xcodeproj` in Xcode. Choose a development team in **Signing & Capabilities**, connect the iPhone, and Run. Approve camera access on the device. Photos add-only access is requested only when a capture is saved.
+On a device supporting ARKit scene depth, open the camera adjustment panel and its timer menu, then choose Depth Assist. It reports a confidence-checked, smoothed approximate distance at the center and plane-tracking status. It is a separate camera mode; close it to return to full-resolution photography. Front TrueDepth and 3D viewpoint reconstruction are not implemented.
 
-## Capture behavior
+## GitHub Actions from Windows
 
-- The back camera prefers `.builtInTripleCamera` and falls back to `.builtInWideAngleCamera`; the front camera uses its wide-angle camera.
-- Zoom buttons and horizontal swipes select 0.5×, 1×, 2×, and 5× where those factors are supported by the active camera. Unsupported stops are disabled.
-- Tap the preview to focus and expose. The exposure slider controls AVFoundation exposure bias.
-- The capture format control offers HEIF by default and RAW + processed HEIF when the device supports RAW. The processed image is available for review; RAW data is stored alongside it in Photos when present.
-- Apple ProRAW is enabled on the capture output before the session starts when the connected device and configuration support it. The RAW preference chooses ProRAW when available and Bayer RAW otherwise.
-- Vision analysis is downsampled and throttled. The live horizon level uses Core Motion. Guide can fall back to a deterministic thirds-based instruction.
+Push changes to the existing repository or run **Build unsigned Still iOS IPA** in Actions. The workflow:
 
-## Limits of this prototype
+1. Selects the newest installed stable Xcode on macos-latest and generates the project using XcodeGen.
+2. Archives for physical iOS with signing disabled and records a build result bundle.
+3. Runs camera-state, zoom, crop, edit-persistence and image-export tests on an available iPhone simulator.
+4. Launches the simulator app and captures a screenshot. A simulator cannot verify physical camera features.
+5. Packages Payload/Still.app into StillCamera-unsigned.ipa and uploads it with BuildInfo.txt. Logs, result bundles and screenshot are uploaded separately, including when a build fails.
 
-This source tree and workflow have not been built on a Mac in this workspace. The first capture slice does not yet include the full Framed film editor, custom frame drawing, video capture, a persistent in-app photo library, or manual shutter-speed/ISO dials. Those features should be added only after a device build and camera/RAW behavior have been verified on the iPhone 17 Pro Max.
+Download the StillCamera-unsigned-ipa artifact. Its IPA needs signing through a compatible sideloading tool or your Apple development workflow before device installation. BuildInfo.txt identifies the actual SDK used; the requested device OS does not imply that the runner has SDK 27 installed.
+
+For Mac development: run xcodegen generate in this folder, open StillCamera.xcodeproj, choose a signing team and run the StillCamera scheme. The minimum deployment target is iOS 18.
+
+## Diagnostics
+
+Settings > About & support > Camera diagnostics contains runtime iOS version, app version, camera configuration and recent state/error events. No photo content is included. Share it with a matching device .ips crash report when reporting failures. See the device checklist before claiming that crashes, heat or frame pacing are resolved.

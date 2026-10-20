@@ -66,6 +66,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/archive.log"
 
       - name: Run camera safety and image pipeline tests
+        timeout-minutes: 12
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -84,6 +85,8 @@ jobs:
             -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath "$RUNNER_TEMP/StillDerivedData" \
             -destination-timeout 180 -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+            -maximum-test-execution-time-allowance 120 \
             -resultBundlePath "$RUNNER_TEMP/Tests.xcresult" \
             test CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             2>&1 | tee "$RUNNER_TEMP/tests.log"
