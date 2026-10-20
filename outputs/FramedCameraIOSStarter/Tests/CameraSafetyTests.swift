@@ -61,6 +61,24 @@ final class CameraSafetyTests: XCTestCase {
     }
 
     @MainActor
+    func testFilmLookThumbnailsAreSmallCachedAndVisuallyDifferent() async throws {
+        let photo = LibraryPhoto(id: UUID(), sourceExtension: "png", hasRaw: false, metadata: PhotoMetadata(), recipe: EditRecipe())
+        try FileManager.default.createDirectory(at: photo.directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: photo.directory) }
+        let source = UIGraphicsImageRenderer(size: CGSize(width: 80, height: 120)).image { context in
+            UIColor.orange.setFill(); context.fill(CGRect(x: 0, y: 0, width: 80, height: 120))
+        }
+        let data = try XCTUnwrap(source.pngData())
+        try data.write(to: photo.originalURL); try data.write(to: photo.thumbnailURL)
+        let original = try await PhotoRenderer.shared.lookThumbnail(photo, look: "Original")
+        let cached = try await PhotoRenderer.shared.lookThumbnail(photo, look: "Original")
+        let slate = try await PhotoRenderer.shared.lookThumbnail(photo, look: "Slate")
+        XCTAssertTrue(original === cached)
+        XCTAssertLessThanOrEqual(max(original.size.width, original.size.height), 160)
+        XCTAssertNotEqual(original.pngData(), slate.pngData())
+    }
+
+    @MainActor
     func testExposureAdjustmentChangesRenderedImage() async throws {
         let photo = LibraryPhoto(id: UUID(), sourceExtension: "png", hasRaw: false, metadata: PhotoMetadata(), recipe: EditRecipe())
         try FileManager.default.createDirectory(at: photo.directory, withIntermediateDirectories: true)
