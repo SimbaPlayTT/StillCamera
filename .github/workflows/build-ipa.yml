@@ -1,4 +1,4 @@
-name: Build unsigned Still iOS IPA
+﻿name: Build unsigned Still iOS IPA
 
 on:
   push:
@@ -21,8 +21,6 @@ jobs:
     timeout-minutes: 45
     env:
       PROJECT_DIR: outputs/FramedCameraIOSStarter
-      ARCHIVE_PATH: ${{ runner.temp }}/StillCamera.xcarchive
-      IPA_PATH: ${{ github.workspace }}/outputs/FramedCameraIOSStarter/artifacts/StillCamera-unsigned.ipa
 
     steps:
       - name: Check out source
@@ -48,7 +46,7 @@ jobs:
           -scheme StillCamera
           -configuration Release
           -destination 'generic/platform=iOS'
-          -archivePath '${{ env.ARCHIVE_PATH }}'
+          -archivePath "$RUNNER_TEMP/StillCamera.xcarchive"
           archive
           CODE_SIGNING_ALLOWED=NO
           CODE_SIGNING_REQUIRED=NO
@@ -57,8 +55,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ARCHIVE_PATH="${RUNNER_TEMP}/StillCamera.xcarchive"
+          IPA_PATH="${GITHUB_WORKSPACE}/outputs/FramedCameraIOSStarter/artifacts/StillCamera-unsigned.ipa"
           APP_PATH="${ARCHIVE_PATH}/Products/Applications/Still.app"
           IPA_ROOT="${RUNNER_TEMP}/still-ipa-root"
+          
           test -d "$APP_PATH"
           mkdir -p "$IPA_ROOT/Payload" "$(dirname "$IPA_PATH")"
           ditto "$APP_PATH" "$IPA_ROOT/Payload/Still.app"
