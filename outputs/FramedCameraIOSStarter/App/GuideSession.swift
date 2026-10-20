@@ -340,11 +340,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         let subjectPixels = CameraMath.viewRect(subject, imageSize: imageSize, viewSize: viewport)
         let center = CGPoint(x: subjectPixels.midX / viewport.width, y: subjectPixels.midY / viewport.height)
         guard let distance = depth(at: center, frame: frame) else { return } // Honest visual fallback on distant/unmapped surfaces.
-        var plane = frame.camera.transform
-        let position = SIMD3<Float>(plane.columns.3.x, plane.columns.3.y, plane.columns.3.z)
-        let forward = SIMD3<Float>(plane.columns.2.x, plane.columns.2.y, plane.columns.2.z)
-        let location = position - forward * distance
-        plane.columns.3 = SIMD4<Float>(location, 1)
+        guard let plane = GuideWorldGeometry.cameraFacingPlane(camera: frame.camera.transform, depth: distance) else { return }
         let unprojected = rectanglePoints(rect).compactMap { point in
             frame.camera.unprojectPoint(CGPoint(x: point.x * viewport.width, y: point.y * viewport.height),
                 ontoPlane: plane, orientation: .portrait, viewportSize: viewport)

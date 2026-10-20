@@ -4,6 +4,19 @@ import Vision
 import CoreVideo
 import CoreImage
 import ImageIO
+import simd
+
+enum GuideWorldGeometry {
+    /// ARKit's plane has a +Y normal (its local XZ plane), unlike a camera's image XY plane.
+    static func cameraFacingPlane(camera: simd_float4x4, depth: Float) -> simd_float4x4? {
+        guard depth.isFinite, depth > 0.2 else { return nil }
+        var plane = camera
+        plane.columns.1 = camera.columns.2
+        plane.columns.2 = -camera.columns.1
+        plane.columns.3 = camera.columns.3 - camera.columns.2 * depth
+        return plane
+    }
+}
 
 enum GuideStyle: String, CaseIterable, Identifiable {
     case balanced = "Everyday", instagram = "Instagram post", portrait = "Portrait"

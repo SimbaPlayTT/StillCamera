@@ -120,4 +120,21 @@ final class GuidedCaptureTests: XCTestCase {
         XCTAssertEqual(center, CGPoint(x: 0.5, y: 0.5))
         XCTAssertEqual(GuidePlanner.instruction(target: CGPoint(x: 0.5, y: 0.2), level: 0), "Move phone up")
     }
+
+    func testWorldFramePlaneFacesCameraUsingARKitYNormalConvention() throws {
+        var camera = simd_float4x4(simd_quatf(angle: 0.4, axis: SIMD3<Float>(0, 1, 0)))
+        camera.columns.3 = SIMD4<Float>(1, 2, 3, 1)
+        let plane = try XCTUnwrap(GuideWorldGeometry.cameraFacingPlane(camera: camera, depth: 2))
+        XCTAssertEqual(plane.columns.1, camera.columns.2)
+        for local in [SIMD4<Float>(0, 0, 0, 1), SIMD4<Float>(0.7, 0, -0.4, 1)] {
+            let worldPoint = plane * local
+            let inCamera = simd_inverse(camera) * worldPoint
+            XCTAssertEqual(inCamera.z, -2, accuracy: 0.0001)
+            var movedCamera = camera
+            movedCamera.columns.3.x += 0.5
+            let afterMoving = simd_inverse(movedCamera) * worldPoint
+            XCTAssertNotEqual(inCamera.x, afterMoving.x, "A fixed world target must shift on screen when the camera moves")
+        }
+        XCTAssertNil(GuideWorldGeometry.cameraFacingPlane(camera: camera, depth: .nan))
+    }
 }
