@@ -35,7 +35,7 @@ struct CameraView: View {
     @State private var storingCapture = false
     @State private var userFrame = CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.5)
     private var aspect: CaptureAspect { CaptureAspect(rawValue: aspectValue) ?? .standard }
-    private var ready: Bool { camera.phase == .running && !storingCapture && countdown == nil }
+    private var ready: Bool { camera.phase == .running && !storingCapture && countdown == nil && camera.capturedPhoto == nil }
     private var framedObservation: CompositionObservation {
         let unit = CGSize(width: aspect.ratio, height: 1)
         let bounds = camera.compositionObservation.subjectBounds.map {
@@ -80,6 +80,9 @@ struct CameraView: View {
         }
         .onChange(of: camera.supportsRaw) { _, raw in if !raw { format = CaptureFormat.heif.rawValue } }
         .onChange(of: camera.currentZoomFactor) { _, _ in coachTask?.cancel(); coachText = nil }
+        .onChange(of: flash) { _, value in
+            if value != .off && camera.torchOn { camera.setTorch(false) }
+        }
         .onChange(of: camera.capturedPhoto?.id) { _, id in
             if id != nil { keepCapture() }
         }
@@ -98,6 +101,9 @@ struct CameraView: View {
         })) {
             Button("OK") { camera.dismissMessage(); library.error = nil }
             if camera.capturedPhoto != nil && !storingCapture { Button("Retry keeping photo") { keepCapture() } }
+            if camera.capturedPhoto != nil && !storingCapture {
+                Button("Discard unsaved capture", role: .destructive) { camera.clearCapturedPhoto(); library.error = nil; camera.dismissMessage() }
+            }
             if camera.phase == .failed { Button("Retry") { camera.start() } }
         } message: { Text(camera.message ?? library.error ?? "") }
     }
@@ -112,7 +118,11 @@ struct CameraView: View {
                 Image(systemName: flash == .off ? "bolt.slash" : "bolt.fill")
                     .foregroundStyle(flash == .off ? .white : .yellow).frame(width: 48, height: 48)
             }.disabled(!camera.hasFlash || !ready).accessibilityLabel("Photo flash")
-            Button { camera.setTorch(!camera.torchOn) } label: {
+            Button {
+                let enabled = !camera.torchOn
+                if enabled { flash = .off }
+                camera.setTorch(enabled)
+            } label: {
                 Image(systemName: camera.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                     .foregroundStyle(camera.torchOn ? .yellow : .white).frame(width: 48, height: 48)
             }.disabled(!camera.hasTorch || !ready).accessibilityLabel(camera.torchOn ? "Turn continuous light off" : "Turn continuous light on")
