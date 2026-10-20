@@ -233,12 +233,12 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    func focus(at point: CGPoint, lock: Bool = false) {
+    func focus(at point: CGPoint, lock: Bool = false, continuous: Bool = false) {
         configureDevice(lock ? "AE/AF lock" : "focus") { device in
             let safe = CGPoint(x: min(max(point.x, 0), 1), y: min(max(point.y, 0), 1))
             if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = safe }
             if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = safe }
-            let focusMode: AVCaptureDevice.FocusMode = lock ? .locked : .autoFocus
+            let focusMode: AVCaptureDevice.FocusMode = lock ? .locked : continuous ? .continuousAutoFocus : .autoFocus
             let exposureMode: AVCaptureDevice.ExposureMode = lock ? .locked : .continuousAutoExposure
             if device.isFocusModeSupported(focusMode) { device.focusMode = focusMode }
             if device.isExposureModeSupported(exposureMode) { device.exposureMode = exposureMode }

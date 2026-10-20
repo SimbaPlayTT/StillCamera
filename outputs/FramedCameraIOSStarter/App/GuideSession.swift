@@ -66,6 +66,8 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
     private var lastProcessed: CFTimeInterval = 0
     private var roll: CGFloat = 0
     private var deviceSteady = true
+    private var lastFocusPoint: CGPoint?
+    private var lastFocusTime: CFTimeInterval = 0
     private var autoCapture: Bool
     private let autoZoom: Bool
     private let dwell: Double
@@ -204,6 +206,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         if let worldAnchor { arSession.remove(anchor: worldAnchor) }
         worldAnchor = nil; corners = []; anchorCorners = []; anchorSubject = nil; worldSubject = nil
         captureTicket = nil; plan = nil; trackingBox = nil
+        lastFocusPoint = nil; lastFocusTime = 0
         gate.reset(); lost = false; zoomPrepared = false; zooming = false
         zoom = 1; desiredZoom = 1; lastProcessed = 0
     }
@@ -314,6 +317,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
                 let displayed = usesWorldCamera ? points.map { GuidePlanner.zoomed($0, by: zoom) } : points
                 let target = midpoint(displayed)
                 let framing = usesWorldCamera && desiredZoom - zoom > 0.015
+                if centered, trusted, !framing { focusOnSubject(frame: arFrame, time: now) }
                 let hardwareReady: Bool
                 if usesWorldCamera, let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera {
                     hardwareReady = !device.isAdjustingFocus && !device.isAdjustingExposure
@@ -417,6 +421,31 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
+    private func focusOnSubject(frame: ARFrame?, time: CFTimeInterval) {
+        let point: CGPoint
+        if let frame, let worldSubject {
+            let screen = frame.camera.projectPoint(worldSubject, orientation: .portrait, viewportSize: viewport)
+            point = CGPoint(x: screen.x / viewport.width, y: screen.y / viewport.height)
+                .applying(frame.displayTransform(for: .portrait, viewportSize: viewport).inverted())
+        } else if let trackingBox {
+            // Back-camera focus points use the unrotated landscape sensor coordinate system.
+            point = CGPoint(x: trackingBox.midY, y: 1 - trackingBox.midX)
+        } else { return }
+        guard point.x.isFinite, point.y.isFinite, (0...1).contains(point.x), (0...1).contains(point.y),
+              time - lastFocusTime > 0.6 else { return }
+        if let previous = lastFocusPoint, hypot(point.x - previous.x, point.y - previous.y) < 0.06 { return }
+        lastFocusPoint = point; lastFocusTime = time; gate.reset()
+        if usesWorldCamera, let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera {
+            do {
+                try device.lockForConfiguration(); defer { device.unlockForConfiguration() }
+                if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = point }
+                if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+                if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = point }
+                if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            } catch { CameraDiagnostics.shared.record("Guide focus: \(error.localizedDescription)") }
+        } else { camera.focus(at: point, continuous: true) }
+    }
+
     private func takePhoto(automatic: Bool) {
         guard running, !shotPending, !lost, !zooming, let plan else { return }
         shotPending = true
@@ -441,7 +470,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
             camera.checkGuidedReadiness { [weak self] ready in
                 self?.queue.async {
                     guard let self, self.running, token == self.generation, self.captureTicket == ticket else { return }
-                    guard ready else {
+                    guard ready || !automatic else {
                         self.shotPending = false; self.captureTicket = nil; self.gate.reset()
                         self.publish(.locked, "Let the camera settle", detail: plan.title); return
                     }
