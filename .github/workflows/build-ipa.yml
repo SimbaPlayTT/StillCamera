@@ -1,4 +1,4 @@
-﻿name: Build unsigned Still iOS IPA
+name: Build unsigned Still iOS IPA
 
 on:
   push:
@@ -14,63 +14,126 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: still-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-unsigned-ipa:
-    name: Archive and package unsigned IPA
+    name: Verify, archive and package iOS app
     runs-on: macos-latest
     timeout-minutes: 45
     env:
       PROJECT_DIR: outputs/FramedCameraIOSStarter
-
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Select newest installed stable Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          XCODE_PATH=$(python3 - <<'PY'
+          import glob, re
+          candidates = []
+          for path in glob.glob('/Applications/Xcode*.app'):
+              match = re.fullmatch(r'/Applications/Xcode_(\d+(?:\.\d+)*)\.app', path)
+              if match:
+                  candidates.append((tuple(map(int, match[1].split('.'))), path))
+          print(max(candidates)[1] if candidates else '/Applications/Xcode.app')
+          PY
+          )
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Show Apple build tool versions
-        run: |
-          xcodebuild -version
-          xcodegen version
-
-      - name: Generate Xcode project
+      - name: Generate project
         working-directory: ${{ env.PROJECT_DIR }}
         run: xcodegen generate --spec project.yml
 
       - name: Archive for physical iOS devices
         working-directory: ${{ env.PROJECT_DIR }}
-        run: >-
-          xcodebuild
-          -project StillCamera.xcodeproj
-          -scheme StillCamera
-          -configuration Release
-          -destination 'generic/platform=iOS'
-          -archivePath "$RUNNER_TEMP/StillCamera.xcarchive"
-          archive
-          CODE_SIGNING_ALLOWED=NO
-          CODE_SIGNING_REQUIRED=NO
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -quiet -project StillCamera.xcodeproj -scheme StillCamera \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/StillCamera.xcarchive" \
+            -resultBundlePath "$RUNNER_TEMP/Archive.xcresult" \
+            archive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/archive.log"
+
+      - name: Run camera safety and image pipeline tests
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          phones = [(runtime, device["udid"]) for runtime, group in devices.items()
+                    if "iOS" in runtime for device in group
+                    if device.get("isAvailable") and "iPhone" in device["name"]]
+          if not phones: raise SystemExit("No available iPhone simulator")
+          print(sorted(phones)[-1][1])
+          ')
+          echo "SIMULATOR_ID=$SIMULATOR_ID" >> "$GITHUB_ENV"
+          xcodebuild -quiet -project StillCamera.xcodeproj -scheme StillCamera \
+            -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/StillDerivedData" \
+            -destination-timeout 180 -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/Tests.xcresult" \
+            test CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/tests.log"
+
+      - name: Launch app in simulator and capture screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl install "$SIMULATOR_ID" "$RUNNER_TEMP/StillDerivedData/Build/Products/Debug-iphonesimulator/Still.app"
+          xcrun simctl privacy "$SIMULATOR_ID" grant camera com.example.stillcamera || true
+          xcrun simctl launch "$SIMULATOR_ID" com.example.stillcamera
+          sleep 3
+          xcrun simctl io "$SIMULATOR_ID" screenshot "$RUNNER_TEMP/Simulator.png"
 
       - name: Package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
-          ARCHIVE_PATH="${RUNNER_TEMP}/StillCamera.xcarchive"
-          IPA_PATH="${GITHUB_WORKSPACE}/outputs/FramedCameraIOSStarter/artifacts/StillCamera-unsigned.ipa"
-          APP_PATH="${ARCHIVE_PATH}/Products/Applications/Still.app"
-          IPA_ROOT="${RUNNER_TEMP}/still-ipa-root"
-          
+          APP_PATH="$RUNNER_TEMP/StillCamera.xcarchive/Products/Applications/Still.app"
+          IPA_ROOT="$RUNNER_TEMP/still-ipa-root"
+          OUTPUT="$GITHUB_WORKSPACE/outputs/FramedCameraIOSStarter/artifacts"
           test -d "$APP_PATH"
-          mkdir -p "$IPA_ROOT/Payload" "$(dirname "$IPA_PATH")"
+          mkdir -p "$IPA_ROOT/Payload" "$OUTPUT"
           ditto "$APP_PATH" "$IPA_ROOT/Payload/Still.app"
-          cd "$IPA_ROOT"
-          /usr/bin/zip -qry "$IPA_PATH" Payload
-          test -s "$IPA_PATH"
+          (cd "$IPA_ROOT" && /usr/bin/zip -qry "$OUTPUT/StillCamera-unsigned.ipa" Payload)
+          test -s "$OUTPUT/StillCamera-unsigned.ipa"
+          xcodebuild -version > "$OUTPUT/BuildInfo.txt"
+          echo "Commit: $GITHUB_SHA" >> "$OUTPUT/BuildInfo.txt"
+          echo "SDK: $(xcrun --sdk iphoneos --show-sdk-version)" >> "$OUTPUT/BuildInfo.txt"
+          echo "Minimum iOS: 18.0. Target physical verification: iPhone 17 Pro Max / iOS 27.0." >> "$OUTPUT/BuildInfo.txt"
+          echo "Simulator checks do not verify physical camera, flash, RAW, LiDAR or model availability." >> "$OUTPUT/BuildInfo.txt"
 
-      - name: Upload unsigned IPA artifact
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: StillCamera-unsigned-ipa
-          path: outputs/FramedCameraIOSStarter/artifacts/StillCamera-unsigned.ipa
+          path: outputs/FramedCameraIOSStarter/artifacts/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build and test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StillCamera-build-diagnostics
+          path: |
+            ${{ runner.temp }}/archive.log
+            ${{ runner.temp }}/tests.log
+            ${{ runner.temp }}/Archive.xcresult
+            ${{ runner.temp }}/Tests.xcresult
+            ${{ runner.temp }}/Simulator.png
+          if-no-files-found: warn
           retention-days: 14

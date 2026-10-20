@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Vision
+import CoreVideo
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -46,7 +47,7 @@ enum CompositionCoach {
         #endif
     }
 
-    static func analyze(frame: CGImage) -> VisionComposition {
+    static func analyze(pixelBuffer: CVPixelBuffer) -> VisionComposition {
         let faceRequest = VNDetectFaceRectanglesRequest()
         let poseRequest = VNDetectHumanBodyPoseRequest()
         let saliencyRequest = VNGenerateObjectnessBasedSaliencyImageRequest()
@@ -55,7 +56,8 @@ enum CompositionCoach {
         rectangleRequest.minimumConfidence = 0.55
         rectangleRequest.minimumSize = 0.12
 
-        let handler = VNImageRequestHandler(cgImage: frame, orientation: .right, options: [:])
+        // Video output is physically rotated/mirrored to match the portrait preview.
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         do {
             try handler.perform([faceRequest, poseRequest, saliencyRequest, rectangleRequest])
         } catch {
@@ -87,16 +89,13 @@ enum CompositionCoach {
         let salient = salientObject?.boundingBox
         let rectangle = rectangleRequest.results?.first?.boundingBox
         let visionBox = face?.boundingBox ?? poseBounds ?? salient ?? rectangle
-        let screenBox = visionBox.map(toTopLeftCoordinates)
-        let center = screenBox.map { CGPoint(x: $0.midX, y: $0.midY) }
+        return observation(bounds: visionBox.map(toTopLeftCoordinates), face: face != nil, pose: largestPose != nil)
+    }
 
-        return VisionComposition(
-            subjectBounds: screenBox,
-            subjectCenter: center,
-            suggestedAdjustment: heuristic(for: center),
-            detectedFace: face != nil,
-            detectedPose: largestPose != nil
-        )
+    static func observation(bounds: CGRect?, face: Bool, pose: Bool) -> VisionComposition {
+        let center = bounds.map { CGPoint(x: $0.midX, y: $0.midY) }
+        return VisionComposition(subjectBounds: bounds, subjectCenter: center,
+            suggestedAdjustment: heuristic(for: center), detectedFace: face, detectedPose: pose)
     }
 
     @MainActor
@@ -108,7 +107,9 @@ enum CompositionCoach {
         let session = LanguageModelSession(
             instructions: "You are a concise, practical camera composition guide. Based only on coarse, non-identifying framing measurements, offer one small physical camera adjustment in no more than eight words. Never identify a person or scene, praise or rate the photo, mention AI, or suggest editing. If the frame is balanced, say: Hold this frame."
         )
+        try Task.checkCancellation()
         let response = try await session.respond(to: modelPrompt(for: observation))
+        try Task.checkCancellation()
         let suggestion = response.content
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\n", with: " ")
@@ -138,13 +139,13 @@ enum CompositionCoach {
         return "The \(subject) is in the \(horizontal), \(vertical); \(level). Give one short adjustment or say Hold this frame."
     }
 
-    private static func heuristic(for center: CGPoint?) -> String {
+    static func heuristic(for center: CGPoint?) -> String {
         guard let center else { return "Place your subject near a third and keep the horizon level." }
-        if center.x < 0.31 { return "Shift the frame slightly right." }
-        if center.x > 0.69 { return "Shift the frame slightly left." }
-        if center.y < 0.31 { return "Lower the frame a little." }
-        if center.y > 0.69 { return "Raise the frame slightly." }
-        return "Hold the frame and keep the horizon level."
+        if center.x < 0.29 { return "Move the camera slightly left." }
+        if center.x > 0.71 { return "Move the camera slightly right." }
+        if center.y < 0.29 { return "Aim the camera a little higher." }
+        if center.y > 0.71 { return "Aim the camera a little lower." }
+        return "Hold this frame."
     }
 
     private static func area(of rect: CGRect) -> CGFloat {

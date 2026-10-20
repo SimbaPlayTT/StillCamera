@@ -1,525 +1,566 @@
 import AVFoundation
 import Combine
-import CoreGraphics
-import CoreImage
 import CoreMotion
 import CoreVideo
 import Foundation
-import Photos
-import QuartzCore
+import ImageIO
 import UIKit
 import Vision
 
-enum CameraAuthorizationState: Equatable {
-    case checking
-    case authorized
-    case denied
-    case restricted
-    case unavailable
-    case failed(String)
-}
-
-enum CaptureFormat: String, CaseIterable, Identifiable, Equatable {
-    case heif
-    case raw
-
-    var id: String { rawValue }
-    var title: String { self == .raw ? "RAW + HEIF" : "HEIF" }
-}
-
-struct LensPreset: Identifiable, Equatable {
-    let title: String
-    let factor: CGFloat
-
-    var id: String { title }
-
-    static let standard: [LensPreset] = [
-        LensPreset(title: "0.5×", factor: 0.5),
-        LensPreset(title: "1×", factor: 1),
-        LensPreset(title: "2×", factor: 2),
-        LensPreset(title: "5×", factor: 5)
-    ]
-}
-
-struct CompositionObservation {
-    /// Normalized top-left-origin bounds suitable for SwiftUI overlays.
-    let subjectBounds: CGRect?
-    let subjectCenter: CGPoint?
-    let horizonAngle: CGFloat
-    let suggestedAdjustment: String
-    let detectedFace: Bool
-    let detectedPose: Bool
-
-    static let neutral = CompositionObservation(
-        subjectBounds: nil,
-        subjectCenter: nil,
-        horizonAngle: 0,
-        suggestedAdjustment: "Keep the horizon level and leave room around your subject.",
-        detectedFace: false,
-        detectedPose: false
-    )
-}
-
-struct CapturedPhoto: Identifiable {
-    let id = UUID()
-    let processedData: Data
-    let rawData: Data?
-    let processedFileExtension: String
-    let date = Date()
-}
-
+/// All session/device mutations and photo bookkeeping belong to sessionQueue.
+/// Published values are snapshots delivered on the main queue.
 final class CameraService: NSObject, ObservableObject {
     @Published private(set) var authorization: CameraAuthorizationState = .checking
+    @Published private(set) var phase: SessionState = .idle
     @Published private(set) var isRunning = false
     @Published private(set) var isCapturing = false
     @Published private(set) var capturedPhoto: CapturedPhoto?
     @Published private(set) var supportsRaw = false
     @Published private(set) var supportsProRAW = false
     @Published private(set) var hasFlash = false
+    @Published private(set) var hasTorch = false
+    @Published private(set) var torchOn = false
+    @Published private(set) var isFrontCamera = false
+    @Published private(set) var lenses: [LensPreset] = []
     @Published private(set) var minimumZoomFactor: CGFloat = 1
     @Published private(set) var maximumZoomFactor: CGFloat = 1
     @Published private(set) var currentZoomFactor: CGFloat = 1
+    @Published private(set) var exposureBias: Float = 0
+    @Published private(set) var exposureRange: ClosedRange<Float> = -2...2
+    @Published private(set) var manualExposureSupported = false
+    @Published private(set) var exposureLocked = false
+    @Published private(set) var exposureIsManual = false
+    @Published private(set) var actualISO: Float = 0
+    @Published private(set) var actualExposure: Double = 0
     @Published private(set) var horizonAngle: CGFloat = 0
+    @Published private(set) var imageSize = CGSize(width: 3, height: 4)
     @Published private(set) var compositionObservation = CompositionObservation.neutral
     @Published private(set) var message: String?
 
     let session = AVCaptureSession()
-
-    private let sessionQueue = DispatchQueue(label: "com.example.still.camera-session", qos: .userInitiated)
-    private let analysisQueue = DispatchQueue(label: "com.example.still.vision-analysis", qos: .userInitiated)
-    private let videoOutput = AVCaptureVideoDataOutput()
+    private let sessionQueue = DispatchQueue(label: "still.camera.session", qos: .userInitiated)
+    private let analysisQueue = DispatchQueue(label: "still.camera.vision", qos: .utility)
     private let photoOutput = AVCapturePhotoOutput()
-    private let ciContext = CIContext(options: [.cacheIntermediates: false])
-    private let motionManager = CMMotionManager()
-    private var lastAnalysisTime: CFTimeInterval = 0
-    private var activeInput: AVCaptureDeviceInput?
-    private var activeDevice: AVCaptureDevice?
-    private var cameraPosition: AVCaptureDevice.Position = .back
-    private var isConfigured = false
-    private var captureInProgress = false
-    private var pendingCaptures: [Int64: PendingCapture] = [:]
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let motion = CMMotionManager()
+    private var input: AVCaptureDeviceInput?
+    private var state: SessionState = .idle
+    private var configured = false
+    private var wantsRunning = false
+    private var appActive = true
+    private var zoomMultiplier: CGFloat = 1
+    private var observations: [NSKeyValueObservation] = []
+    private var pending: PendingCapture?
+    private let analysisLock = NSLock()
+    private var analysisEnabled = false
+    private var requestedTarget: CGRect?
+    private var targetRevision = 0
+    // The following fields are only touched on analysisQueue.
+    private var lastAnalysis: CFTimeInterval = 0
+    private var appliedTargetRevision = -1
+    private var trackingRequest: VNTrackObjectRequest?
+    private var trackingHandler = VNSequenceRequestHandler()
+    private var trackingLost = false
 
     private struct PendingCapture {
-        var processedData: Data?
-        var rawData: Data?
-        let processedFileExtension: String
+        let id: Int64
+        let fileExtension: String
+        let aspect: CaptureAspect
+        var metadata: PhotoMetadata
+        var processed: Data?
+        var raw: Data?
+        var error: String?
     }
 
     override init() {
         super.init()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleRuntimeError(_:)),
-            name: .AVCaptureSessionRuntimeError,
-            object: session
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleInterruptionEnded),
-            name: .AVCaptureSessionInterruptionEnded,
-            object: session
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleDidEnterBackground),
-            name: UIApplication.didEnterBackgroundNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleWillEnterForeground),
-            name: UIApplication.willEnterForegroundNotification,
-            object: nil
-        )
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(runtimeError(_:)), name: .AVCaptureSessionRuntimeError, object: session)
+        center.addObserver(self, selector: #selector(interrupted(_:)), name: .AVCaptureSessionWasInterrupted, object: session)
+        center.addObserver(self, selector: #selector(interruptionEnded), name: .AVCaptureSessionInterruptionEnded, object: session)
+        center.addObserver(self, selector: #selector(background), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.addObserver(self, selector: #selector(foreground), name: UIApplication.willEnterForegroundNotification, object: nil)
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        motionManager.stopDeviceMotionUpdates()
+        motion.stopDeviceMotionUpdates()
+        videoOutput.setSampleBufferDelegate(nil, queue: nil)
     }
 
     func start() {
-        let status = AVCaptureDevice.authorizationStatus(for: .video)
-        switch status {
-        case .authorized:
-            configureAndStart()
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: enqueueStart()
         case .notDetermined:
-            DispatchQueue.main.async { self.authorization = .checking }
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                guard let self else { return }
-                guard granted else {
-                    DispatchQueue.main.async { self.authorization = .denied }
-                    return
-                }
-                self.configureAndStart()
+                if granted { self?.enqueueStart() }
+                else { DispatchQueue.main.async { self?.authorization = .denied } }
             }
-        case .denied:
-            DispatchQueue.main.async { self.authorization = .denied }
-        case .restricted:
-            DispatchQueue.main.async { self.authorization = .restricted }
-        @unknown default:
-            DispatchQueue.main.async { self.authorization = .unavailable }
+        case .denied: DispatchQueue.main.async { self.authorization = .denied }
+        case .restricted: DispatchQueue.main.async { self.authorization = .restricted }
+        @unknown default: DispatchQueue.main.async { self.authorization = .unavailable }
         }
     }
 
-    func stop() {
-        motionManager.stopDeviceMotionUpdates()
+    private func enqueueStart() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            if self.session.isRunning { self.session.stopRunning() }
-            DispatchQueue.main.async { self.isRunning = false }
+            self.wantsRunning = true
+            self.startIfWanted()
         }
     }
 
-    func setZoomFactor(_ requestedFactor: CGFloat) {
+    /// Completion is called on main only after AVCaptureSession has released the camera.
+    func stop(completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
-            guard let self, let device = self.activeDevice else { return }
-            let factor = min(max(requestedFactor, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-            do {
-                try device.lockForConfiguration()
-                device.videoZoomFactor = factor
-                device.unlockForConfiguration()
-                DispatchQueue.main.async { self.currentZoomFactor = factor }
-            } catch {
-                DispatchQueue.main.async { self.message = "Zoom could not be changed while the camera is busy." }
+            guard let self else { return }
+            self.wantsRunning = false
+            self.turnTorchOff()
+            if self.session.isRunning { self.session.stopRunning() }
+            self.transition(.paused)
+            DispatchQueue.main.async {
+                self.motion.stopDeviceMotionUpdates()
+                completion?()
             }
+        }
+    }
+
+    func setAnalysisEnabled(_ enabled: Bool) {
+        analysisLock.lock()
+        analysisEnabled = enabled
+        if !enabled { requestedTarget = nil; targetRevision += 1 }
+        analysisLock.unlock()
+        if !enabled { DispatchQueue.main.async { self.compositionObservation = .neutral } }
+    }
+
+    func trackSubject(in bounds: CGRect?) {
+        analysisLock.lock()
+        requestedTarget = bounds?.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        targetRevision += 1
+        analysisLock.unlock()
+    }
+
+    func setZoomFactor(_ displayFactor: CGFloat) {
+        configureDevice("zoom") { device in
+            let value = CameraMath.clamp(displayFactor / self.zoomMultiplier,
+                minimum: device.minAvailableVideoZoomFactor,
+                maximum: min(device.maxAvailableVideoZoomFactor, 20 / self.zoomMultiplier))
+            device.cancelVideoZoomRamp()
+            device.videoZoomFactor = value
         }
     }
 
     func setExposureBias(_ value: Float) {
-        sessionQueue.async { [weak self] in
-            guard let self, let device = self.activeDevice else { return }
-            let clamped = min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias)
-            device.setExposureTargetBias(clamped, completionHandler: nil)
+        configureDevice("exposure") { device in
+            guard value.isFinite else { return }
+            let bias = min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias)
+            device.setExposureTargetBias(bias, completionHandler: nil)
         }
     }
 
-    func focus(at devicePoint: CGPoint) {
-        sessionQueue.async { [weak self] in
-            guard let device = self?.activeDevice else { return }
-            do {
-                try device.lockForConfiguration()
-                defer { device.unlockForConfiguration() }
-                if device.isFocusPointOfInterestSupported {
-                    device.focusPointOfInterest = devicePoint
-                    if device.isFocusModeSupported(.autoFocus) { device.focusMode = .autoFocus }
-                }
-                if device.isExposurePointOfInterestSupported {
-                    device.exposurePointOfInterest = devicePoint
-                    if device.isExposureModeSupported(.continuousAutoExposure) {
-                        device.exposureMode = .continuousAutoExposure
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async { self?.message = "Focus is temporarily unavailable." }
+    func setManualExposure(iso: Float?, shutterSeconds: Double?) {
+        configureDevice("manual exposure") { device in
+            if iso == nil && shutterSeconds == nil {
+                if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+                return
             }
+            guard device.isExposureModeSupported(.custom) else { return }
+            let format = device.activeFormat
+            let requestedISO = iso ?? device.iso
+            let safeISO = min(max(requestedISO.isFinite ? requestedISO : device.iso, format.minISO), format.maxISO)
+            let duration = shutterSeconds ?? CMTimeGetSeconds(device.exposureDuration)
+            let seconds = min(max(duration.isFinite ? duration : 1 / 60,
+                CMTimeGetSeconds(format.minExposureDuration)), CMTimeGetSeconds(format.maxExposureDuration))
+            device.setExposureModeCustom(duration: CMTime(seconds: seconds, preferredTimescale: 1_000_000_000),
+                iso: safeISO, completionHandler: { [weak self] _ in
+                    self?.sessionQueue.async { self?.publishCapabilities() }
+                })
+        }
+    }
+
+    func focus(at point: CGPoint, lock: Bool = false) {
+        configureDevice(lock ? "AE/AF lock" : "focus") { device in
+            let safe = CGPoint(x: min(max(point.x, 0), 1), y: min(max(point.y, 0), 1))
+            if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = safe }
+            if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = safe }
+            let focusMode: AVCaptureDevice.FocusMode = lock ? .locked : .autoFocus
+            let exposureMode: AVCaptureDevice.ExposureMode = lock ? .locked : .continuousAutoExposure
+            if device.isFocusModeSupported(focusMode) { device.focusMode = focusMode }
+            if device.isExposureModeSupported(exposureMode) { device.exposureMode = exposureMode }
+        }
+    }
+
+    func setTorch(_ enabled: Bool) {
+        configureDevice("torch") { device in
+            guard device.hasTorch else { self.notice("This camera has no continuous light."); return }
+            guard !enabled || (device.isTorchAvailable && device.isTorchModeSupported(.on)) else {
+                self.notice("Continuous light is temporarily unavailable. Let the iPhone cool down."); return
+            }
+            if enabled { try device.setTorchModeOn(level: min(0.6, AVCaptureDevice.maxAvailableTorchLevel)) }
+            else { device.torchMode = .off }
         }
     }
 
     func switchCamera() {
         sessionQueue.async { [weak self] in
-            guard let self, let oldInput = self.activeInput else { return }
-            let nextPosition: AVCaptureDevice.Position = self.cameraPosition == .back ? .front : .back
-            guard let device = self.device(for: nextPosition),
-                  let newInput = try? AVCaptureDeviceInput(device: device) else { return }
-
+            guard let self, self.state.allowsConfiguration, let old = self.input else { return }
+            let position: AVCaptureDevice.Position = old.device.position == .back ? .front : .back
+            guard let device = self.findDevice(position), let replacement = try? AVCaptureDeviceInput(device: device) else {
+                self.notice("That camera is unavailable."); return
+            }
+            self.transition(.switching)
+            self.turnTorchOff()
+            self.session.stopRunning()
+            self.observations.removeAll()
             self.session.beginConfiguration()
-            self.session.removeInput(oldInput)
-            if self.session.canAddInput(newInput) {
-                self.session.addInput(newInput)
-                self.activeInput = newInput
-                self.activeDevice = device
-                self.cameraPosition = nextPosition
-                let defaultZoom = min(max(1, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-                do {
-                    try device.lockForConfiguration()
-                    device.videoZoomFactor = defaultZoom
-                    device.unlockForConfiguration()
-                } catch {
-                    // The new camera remains available at its current zoom.
-                }
+            self.session.removeInput(old)
+            if self.session.canAddInput(replacement) {
+                self.session.addInput(replacement)
+                self.input = replacement
             } else {
-                self.session.addInput(oldInput)
+                if self.session.canAddInput(old) { self.session.addInput(old) }
+                self.notice("Could not switch cameras. The previous camera was restored.")
             }
             self.session.commitConfiguration()
-            if self.activeDevice === device { self.updateCapabilities(for: device) }
+            self.prepareOutputAndDevice()
+            self.trackSubject(in: nil)
+            self.startIfWanted()
         }
     }
 
-    func capturePhoto(format: CaptureFormat, preferProRAW: Bool, flashMode: AVCaptureDevice.FlashMode) {
+    func capturePhoto(format: CaptureFormat, preferProRAW: Bool, flashMode: AVCaptureDevice.FlashMode,
+                      aspect: CaptureAspect = .standard) {
         sessionQueue.async { [weak self] in
-            guard let self, self.isConfigured, !self.captureInProgress else { return }
-            self.captureInProgress = true
-            DispatchQueue.main.async {
-                self.isCapturing = true
-                self.message = nil
-            }
-
+            guard let self, self.state.allowsCapture, self.session.isRunning, self.pending == nil,
+                  let device = self.input?.device,
+                  let connection = self.photoOutput.connection(with: .video), connection.isEnabled,
+                  connection.isActive else { return }
             let codec: AVVideoCodecType = self.photoOutput.availablePhotoCodecTypes.contains(.hevc) ? .hevc : .jpeg
+            let processed: [String: Any] = [AVVideoCodecKey: codec]
             let settings: AVCapturePhotoSettings
-            let wantsRaw = format == .raw && !self.photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
-
-            if wantsRaw, let rawPixelType = self.rawPixelFormat(preferProRAW: preferProRAW) {
-                let processedFormat: [String: Any] = [AVVideoCodecKey as String: codec]
-                settings = AVCapturePhotoSettings(rawPixelFormatType: rawPixelType, processedFormat: processedFormat)
-                settings.isHighResolutionPhotoEnabled = true
+            if format == .raw {
+                let available = self.photoOutput.availableRawPhotoPixelFormatTypes
+                let raw = preferProRAW ? available.first(where: AVCapturePhotoOutput.isAppleProRAWPixelFormat)
+                    ?? available.first(where: AVCapturePhotoOutput.isBayerRAWPixelFormat) :
+                    available.first(where: AVCapturePhotoOutput.isBayerRAWPixelFormat)
+                    ?? available.first(where: AVCapturePhotoOutput.isAppleProRAWPixelFormat)
+                guard let raw else { self.notice("RAW is unavailable on this camera. Choose HEIF / JPEG."); return }
+                settings = AVCapturePhotoSettings(rawPixelFormatType: raw, processedFormat: processed)
+                // RAW processing has different quality constraints from computational HEIF capture.
+                settings.photoQualityPrioritization = .speed
             } else {
-                settings = AVCapturePhotoSettings(format: [AVVideoCodecKey as String: codec])
-                settings.isHighResolutionPhotoEnabled = true
+                settings = AVCapturePhotoSettings(format: processed)
+                settings.photoQualityPrioritization = .balanced
             }
-
-            settings.photoQualityPrioritization = .quality
-            if self.activeDevice?.hasFlash == true,
-               self.photoOutput.supportedFlashModes.contains(flashMode) {
+            settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            if device.hasFlash && device.isFlashAvailable && device.torchMode == .off &&
+                self.photoOutput.supportedFlashModes.contains(flashMode) {
                 settings.flashMode = flashMode
+            } else {
+                settings.flashMode = .off
+                if flashMode == .on && device.torchMode == .off { self.notice("Flash is unavailable for this capture.") }
             }
-            let fileExtension = codec == .hevc ? "heic" : "jpg"
-            self.pendingCaptures[settings.uniqueID] = PendingCapture(
-                processedData: nil,
-                rawData: nil,
-                processedFileExtension: fileExtension
-            )
+            self.pending = PendingCapture(id: settings.uniqueID, fileExtension: codec == .hevc ? "heic" : "jpg",
+                aspect: aspect, metadata: PhotoMetadata(date: Date(), lens: device.localizedName,
+                    iso: Double(device.iso), exposure: CMTimeGetSeconds(device.exposureDuration)))
+            self.transition(.capturing)
             self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
 
-    func clearCapturedPhoto() {
-        capturedPhoto = nil
-    }
+    func clearCapturedPhoto() { capturedPhoto = nil }
+    func dismissMessage() { message = nil }
 
-    func saveToPhotos(_ photo: CapturedPhoto) async throws {
-        let status: PHAuthorizationStatus = await withCheckedContinuation { (continuation: CheckedContinuation<PHAuthorizationStatus, Never>) in
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { continuation.resume(returning: $0) }
-        }
-        guard status == .authorized else { throw PhotoSaveError.permissionDenied }
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHPhotoLibrary.shared().performChanges {
-                let request = PHAssetCreationRequest.forAsset()
-                let processedOptions = PHAssetResourceCreationOptions()
-                processedOptions.originalFilename = "Still-\(photo.id.uuidString).\(photo.processedFileExtension)"
-                request.addResource(with: .photo, data: photo.processedData, options: processedOptions)
-                if let rawData = photo.rawData {
-                    let rawOptions = PHAssetResourceCreationOptions()
-                    rawOptions.originalFilename = "Still-\(photo.id.uuidString).dng"
-                    rawOptions.uniformTypeIdentifier = "com.adobe.raw-image"
-                    request.addResource(with: .alternatePhoto, data: rawData, options: rawOptions)
-                }
-            } completionHandler: { success, error in
-                if let error { continuation.resume(throwing: error) }
-                else if success { continuation.resume(returning: ()) }
-                else { continuation.resume(throwing: PhotoSaveError.writeFailed) }
-            }
-        }
-    }
-
-    private func configureAndStart() {
+    private func configureDevice(_ operation: String, change: @escaping (AVCaptureDevice) throws -> Void) {
         sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if self.isConfigured {
-                if !self.session.isRunning { self.session.startRunning() }
-                DispatchQueue.main.async { self.isRunning = true; self.authorization = .authorized }
-                self.startMotionUpdates()
-                return
+            guard let self, self.state.allowsConfiguration, let device = self.input?.device else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                try change(device)
+                self.publishCapabilities()
+            } catch {
+                self.notice("Could not change \(operation): \(error.localizedDescription)")
             }
-
-            guard let device = self.device(for: .back),
-                  let input = try? AVCaptureDeviceInput(device: device) else {
-                DispatchQueue.main.async { self.authorization = .unavailable }
-                return
-            }
-
-            self.session.beginConfiguration()
-            self.session.sessionPreset = .photo
-            self.videoOutput.alwaysDiscardsLateVideoFrames = true
-            self.videoOutput.videoSettings = [
-                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
-            ]
-            self.videoOutput.setSampleBufferDelegate(self, queue: self.analysisQueue)
-            self.photoOutput.maxPhotoQualityPrioritization = .quality
-
-            guard self.session.canAddInput(input),
-                  self.session.canAddOutput(self.photoOutput),
-                  self.session.canAddOutput(self.videoOutput) else {
-                self.session.commitConfiguration()
-                DispatchQueue.main.async { self.authorization = .unavailable }
-                return
-            }
-
-            self.session.addInput(input)
-            self.session.addOutput(self.photoOutput)
-            self.session.addOutput(self.videoOutput)
-            if let connection = self.photoOutput.connection(with: .video),
-               connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90
-            }
-            self.activeInput = input
-            self.activeDevice = device
-            self.cameraPosition = .back
-            self.isConfigured = true
-            self.session.commitConfiguration()
-            if self.photoOutput.isAppleProRAWSupported {
-                self.photoOutput.isAppleProRAWEnabled = true
-            }
-            self.updateCapabilities(for: device)
-            self.session.startRunning()
-            DispatchQueue.main.async {
-                self.authorization = .authorized
-                self.isRunning = true
-            }
-            self.startMotionUpdates()
         }
     }
 
-    private func device(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        if position == .back,
-           let tripleCamera = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) {
-            return tripleCamera
+    private func startIfWanted() {
+        guard wantsRunning, appActive, pending == nil else { return }
+        if !configured {
+            transition(.configuring)
+            do { try configure() }
+            catch {
+                transition(.failed)
+                notice(error.localizedDescription)
+                DispatchQueue.main.async { self.authorization = .failed(error.localizedDescription) }
+                return
+            }
+        }
+        if !session.isRunning { session.startRunning() }
+        transition(session.isRunning ? .running : .failed)
+        DispatchQueue.main.async {
+            self.authorization = self.session.isRunning ? .authorized : .failed("Camera did not start. Try again.")
+            self.startMotion()
+        }
+    }
+
+    private func configure() throws {
+        guard let device = findDevice(.back) else { throw CameraError.noDevice }
+        let newInput = try AVCaptureDeviceInput(device: device)
+        session.beginConfiguration()
+        session.sessionPreset = .photo
+        guard session.canAddInput(newInput) else { session.commitConfiguration(); throw CameraError.noDevice }
+        session.addInput(newInput)
+        guard session.canAddOutput(photoOutput) else {
+            session.removeInput(newInput); session.commitConfiguration(); throw CameraError.noDevice
+        }
+        session.addOutput(photoOutput)
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+            videoOutput.setSampleBufferDelegate(self, queue: analysisQueue)
+        }
+        input = newInput
+        session.commitConfiguration()
+        configured = true
+        prepareOutputAndDevice()
+    }
+
+    private func findDevice(_ position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        if position == .back {
+            for type in [AVCaptureDevice.DeviceType.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera] {
+                if let device = AVCaptureDevice.default(type, for: .video, position: position) { return device }
+            }
         }
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
     }
 
-    private func rawPixelFormat(preferProRAW: Bool) -> OSType? {
-        let available = photoOutput.availableRawPhotoPixelFormatTypes
-        if preferProRAW, photoOutput.isAppleProRAWEnabled,
-           let proRaw = available.first(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }) {
-            return proRaw
+    private func prepareOutputAndDevice() {
+        guard let device = input?.device else { return }
+        let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+        let hasUltraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+        // Virtual-device zoom starts at its widest constituent. Convert it to wide-camera 1x.
+        zoomMultiplier = hasUltraWide ? 1 / (switches.first ?? 2) : 1
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = CameraMath.clamp(1 / zoomMultiplier,
+                minimum: device.minAvailableVideoZoomFactor, maximum: device.maxAvailableVideoZoomFactor)
+            if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+            if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            device.unlockForConfiguration()
+        } catch { notice(error.localizedDescription) }
+        photoOutput.maxPhotoQualityPrioritization = .quality
+        if photoOutput.isAppleProRAWSupported { photoOutput.isAppleProRAWEnabled = true }
+        else if photoOutput.isAppleProRAWEnabled { photoOutput.isAppleProRAWEnabled = false }
+        let sizes = device.activeFormat.supportedMaxPhotoDimensions
+        let balanced = sizes.filter { Int64($0.width) * Int64($0.height) <= 25_000_000 }
+        if let size = (balanced.isEmpty ? sizes : balanced).max(by: {
+            Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+        }) { photoOutput.maxPhotoDimensions = size }
+        for connection in [photoOutput.connection(with: .video), videoOutput.connection(with: .video)].compactMap({ $0 }) {
+            if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = device.position == .front
+            }
         }
-        return available.first(where: { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) }) ?? available.first
+        observations = [device.observe(\.isTorchActive, options: [.new]) { [weak self] _, _ in
+            self?.sessionQueue.async { self?.publishCapabilities() }
+        }, device.observe(\.isTorchAvailable, options: [.new]) { [weak self] _, _ in
+            self?.sessionQueue.async { self?.publishCapabilities() }
+        }]
+        publishCapabilities()
+        CameraDiagnostics.shared.record("Configured \(device.localizedName); RAW=\(!photoOutput.availableRawPhotoPixelFormatTypes.isEmpty); zoom multiplier=\(zoomMultiplier)")
     }
 
-    private func updateCapabilities(for device: AVCaptureDevice) {
+    private func publishCapabilities() {
+        guard let device = input?.device else { return }
         let minimum = device.minAvailableVideoZoomFactor
-        let maximum = device.maxAvailableVideoZoomFactor
-        let rawTypes = photoOutput.availableRawPhotoPixelFormatTypes
-        let supportsProRAW = photoOutput.isAppleProRAWSupported && rawTypes.contains(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) })
-        let actualZoom = device.videoZoomFactor
+        let maximum = min(device.maxAvailableVideoZoomFactor, 20 / zoomMultiplier)
+        let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+        let presets = CameraMath.displayedPresets(switchFactors: switches, multiplier: zoomMultiplier, minimum: minimum, maximum: maximum)
+        let zoom = device.videoZoomFactor * zoomMultiplier
+        let minZoom = minimum * zoomMultiplier, maxZoom = maximum * zoomMultiplier
+        let raw = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
+        let pro = photoOutput.isAppleProRAWEnabled && photoOutput.availableRawPhotoPixelFormatTypes.contains(where: AVCapturePhotoOutput.isAppleProRAWPixelFormat)
+        let flash = device.hasFlash && device.isFlashAvailable
+        let torch = device.hasTorch && device.isTorchAvailable
+        let activeTorch = device.isTorchActive
+        let front = device.position == .front
+        let bias = device.exposureTargetBias
+        let biasRange = max(-3, device.minExposureTargetBias)...min(3, device.maxExposureTargetBias)
+        let manual = device.isExposureModeSupported(.custom)
+        let locked = device.exposureMode == .locked
+        let custom = device.exposureMode == .custom
+        let iso = device.iso, duration = CMTimeGetSeconds(device.exposureDuration)
         DispatchQueue.main.async {
-            self.minimumZoomFactor = minimum
-            self.maximumZoomFactor = maximum
-            self.currentZoomFactor = actualZoom
-            self.hasFlash = device.hasFlash && device.position == .back
-            self.supportsRaw = !rawTypes.isEmpty
-            self.supportsProRAW = supportsProRAW
+            self.minimumZoomFactor = minZoom; self.maximumZoomFactor = maxZoom
+            self.currentZoomFactor = zoom; self.lenses = presets
+            self.supportsRaw = raw; self.supportsProRAW = pro
+            self.hasFlash = flash; self.hasTorch = torch; self.torchOn = activeTorch
+            self.isFrontCamera = front; self.exposureBias = bias; self.exposureRange = biasRange
+            self.manualExposureSupported = manual; self.exposureLocked = locked
+            self.exposureIsManual = custom; self.actualISO = iso; self.actualExposure = duration
         }
     }
 
-    private func startMotionUpdates() {
-        guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / 20.0
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-            guard let self, let motion else { return }
-            let roll = CGFloat(atan2(motion.gravity.x, -motion.gravity.y))
-            self.horizonAngle = abs(roll) < 0.012 ? 0 : roll
+    private func transition(_ next: SessionState) {
+        state = next
+        let running = session.isRunning
+        CameraDiagnostics.shared.record("Session \(next.rawValue)")
+        DispatchQueue.main.async { self.phase = next; self.isRunning = running; self.isCapturing = next == .capturing }
+    }
+
+    private func notice(_ text: String) {
+        CameraDiagnostics.shared.record(text)
+        DispatchQueue.main.async { self.message = text }
+    }
+
+    private func turnTorchOff() {
+        guard let device = input?.device, device.hasTorch else { return }
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = .off
+            device.unlockForConfiguration()
+        } catch { CameraDiagnostics.shared.record("Torch shutdown: \(error.localizedDescription)") }
+        DispatchQueue.main.async { self.torchOn = false }
+    }
+
+    private func startMotion() {
+        guard motion.isDeviceMotionAvailable, !motion.isDeviceMotionActive else { return }
+        motion.deviceMotionUpdateInterval = 1 / 15
+        motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+            guard let data else { return }
+            let roll = CGFloat(atan2(data.gravity.x, -data.gravity.y))
+            self?.horizonAngle = abs(roll) < 0.015 ? 0 : roll
         }
     }
 
-    private func analyzePreviewFrame(_ pixelBuffer: CVPixelBuffer) {
-        let now = CACurrentMediaTime()
-        guard now - lastAnalysisTime >= 0.45 else { return }
-        lastAnalysisTime = now
-
-        let source = CIImage(cvPixelBuffer: pixelBuffer)
-        let longSide = max(source.extent.width, source.extent.height)
-        guard longSide > 0 else { return }
-        let scale = min(1, 640 / longSide)
-        let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        guard let frame = ciContext.createCGImage(scaled, from: scaled.extent) else { return }
-
-        let vision = CompositionCoach.analyze(frame: frame)
-        DispatchQueue.main.async {
-            self.compositionObservation = CompositionObservation(
-                subjectBounds: vision.subjectBounds,
-                subjectCenter: vision.subjectCenter,
-                horizonAngle: self.horizonAngle,
-                suggestedAdjustment: vision.suggestedAdjustment,
-                detectedFace: vision.detectedFace,
-                detectedPose: vision.detectedPose
-            )
+    @objc private func background() {
+        sessionQueue.async {
+            self.appActive = false; self.turnTorchOff()
+            if self.session.isRunning { self.session.stopRunning() }
+            self.transition(.paused)
+            DispatchQueue.main.async { self.motion.stopDeviceMotionUpdates() }
         }
     }
-
-    @objc private func handleRuntimeError(_ notification: Notification) {
+    @objc private func foreground() { sessionQueue.async { self.appActive = true; self.startIfWanted() } }
+    @objc private func interrupted(_ notification: Notification) {
+        sessionQueue.async { self.turnTorchOff(); self.transition(.interrupted); self.notice("Camera interrupted. It will resume when available.") }
+    }
+    @objc private func interruptionEnded() { sessionQueue.async { self.startIfWanted() } }
+    @objc private func runtimeError(_ notification: Notification) {
         let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError
-        DispatchQueue.main.async {
-            self.message = error?.localizedDescription ?? "The camera session stopped unexpectedly."
-            self.isRunning = false
+        sessionQueue.async {
+            self.pending = nil
+            self.transition(.failed)
+            self.notice(error?.localizedDescription ?? "Camera stopped unexpectedly. Tap Retry.")
+            if error?.code == .mediaServicesWereReset { self.startIfWanted() }
         }
-        if error?.code == .mediaServicesWereReset { start() }
-    }
-
-    @objc private func handleInterruptionEnded() {
-        start()
-    }
-
-    @objc private func handleDidEnterBackground() {
-        stop()
-    }
-
-    @objc private func handleWillEnterForeground() {
-        start()
     }
 }
 
 extension CameraService: AVCapturePhotoCaptureDelegate {
-    func photoOutput(_ output: AVCapturePhotoOutput,
-                     didFinishProcessingPhoto photo: AVCapturePhoto,
-                     error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation() else {
-            if let error { DispatchQueue.main.async { self.message = error.localizedDescription } }
-            return
-        }
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let data = error == nil ? photo.fileDataRepresentation() : nil
+        let raw = photo.isRawPhoto
         let id = photo.resolvedSettings.uniqueID
-        sessionQueue.async { [weak self] in
-            guard let self, var pending = self.pendingCaptures[id] else { return }
-            if photo.isRawPhoto { pending.rawData = data }
-            else { pending.processedData = data }
-            self.pendingCaptures[id] = pending
-        }
-    }
-
-    func photoOutput(_ output: AVCapturePhotoOutput,
-                     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
-                     error: Error?) {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            let pending = self.pendingCaptures.removeValue(forKey: resolvedSettings.uniqueID)
-            self.captureInProgress = false
-            DispatchQueue.main.async {
-                self.isCapturing = false
-                if let error {
-                    self.message = error.localizedDescription
-                } else if let processed = pending?.processedData {
-                    self.capturedPhoto = CapturedPhoto(
-                        processedData: processed,
-                        rawData: pending?.rawData,
-                        processedFileExtension: pending?.processedFileExtension ?? "heic"
-                    )
-                } else {
-                    self.message = "The photo could not be prepared. Please try again."
+        let metadata = photo.metadata
+        sessionQueue.async {
+            guard self.pending?.id == id else { return }
+            if let error { self.pending?.error = error.localizedDescription }
+            if raw { self.pending?.raw = data } else {
+                self.pending?.processed = data
+                if let exif = metadata[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+                    self.pending?.metadata.focalLength = exif[kCGImagePropertyExifFocalLength as String] as? Double ?? 0
+                    if let exposure = exif[kCGImagePropertyExifExposureTime as String] as? Double {
+                        self.pending?.metadata.exposure = exposure
+                    }
                 }
             }
+        }
+    }
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        sessionQueue.async {
+            guard self.pending?.id == resolvedSettings.uniqueID else { return }
+            let capture = self.pending
+            self.pending = nil
+            self.transition(self.session.isRunning ? .running : .paused)
+            if let detail = error?.localizedDescription ?? capture?.error { self.notice(detail) }
+            else if let capture, let data = capture.processed {
+                let result = CapturedPhoto(processedData: data, rawData: capture.raw,
+                    processedFileExtension: capture.fileExtension, metadata: capture.metadata, aspect: capture.aspect)
+                DispatchQueue.main.async { self.capturedPhoto = result }
+            } else { self.notice("The photo could not be processed. Please try again.") }
+            self.publishCapabilities()
         }
     }
 }
 
 extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func captureOutput(_ output: AVCaptureOutput,
-                       didOutput sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        analyzePreviewFrame(pixelBuffer)
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        analysisLock.lock()
+        let enabled = analysisEnabled, target = requestedTarget, revision = targetRevision
+        analysisLock.unlock()
+        guard enabled else { return }
+        let interval: Double = ProcessInfo.processInfo.isLowPowerModeEnabled || ProcessInfo.processInfo.thermalState != .nominal ? 1.4 : 0.6
+        let now = CACurrentMediaTime()
+        guard now - lastAnalysis >= interval, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastAnalysis = now
+        autoreleasepool {
+            let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+            if appliedTargetRevision != revision {
+                appliedTargetRevision = revision
+                trackingHandler = VNSequenceRequestHandler()
+                trackingLost = false
+                trackingRequest = target.flatMap { rect in
+                    guard rect.width > 0.02, rect.height > 0.02 else { return nil }
+                    return VNTrackObjectRequest(detectedObjectObservation: VNDetectedObjectObservation(
+                        boundingBox: CGRect(x: rect.minX, y: 1 - rect.maxY, width: rect.width, height: rect.height)))
+                }
+            }
+            var result: VisionComposition
+            if let request = trackingRequest {
+                do {
+                    try trackingHandler.perform([request], on: buffer, orientation: .up)
+                    if let tracked = request.results?.first as? VNDetectedObjectObservation, tracked.confidence > 0.4 {
+                        request.inputObservation = tracked
+                        let box = tracked.boundingBox
+                        let bounds = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+                        result = CompositionCoach.observation(bounds: bounds, face: false, pose: false)
+                    } else {
+                        trackingRequest = nil
+                        trackingLost = target != nil
+                        result = VisionComposition(subjectBounds: nil, subjectCenter: nil,
+                            suggestedAdjustment: "Subject lost. Select it again.", detectedFace: false, detectedPose: false)
+                    }
+                } catch {
+                    trackingRequest = nil
+                    return
+                }
+            } else if trackingLost {
+                result = VisionComposition(subjectBounds: nil, subjectCenter: nil,
+                    suggestedAdjustment: "Subject lost. Select it again.", detectedFace: false, detectedPose: false)
+            } else {
+                result = CompositionCoach.analyze(pixelBuffer: buffer)
+                if let rect = result.subjectBounds {
+                    trackingRequest = VNTrackObjectRequest(detectedObjectObservation: VNDetectedObjectObservation(
+                        boundingBox: CGRect(x: rect.minX, y: 1 - rect.maxY, width: rect.width, height: rect.height)))
+                }
+            }
+            DispatchQueue.main.async {
+                self.imageSize = size
+                self.compositionObservation = CompositionObservation(subjectBounds: result.subjectBounds,
+                    subjectCenter: result.subjectCenter, horizonAngle: self.horizonAngle,
+                    suggestedAdjustment: result.suggestedAdjustment, detectedFace: result.detectedFace, detectedPose: result.detectedPose)
+            }
+        }
     }
 }
 
-enum PhotoSaveError: LocalizedError {
-    case permissionDenied
-    case writeFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .permissionDenied: return "Allow Still to add photos in iPhone Settings."
-        case .writeFailed: return "The photo could not be saved. Please try again."
-        }
-    }
+private enum CameraError: LocalizedError {
+    case noDevice
+    var errorDescription: String? { "A compatible camera could not be configured. Close other camera apps and try again." }
 }

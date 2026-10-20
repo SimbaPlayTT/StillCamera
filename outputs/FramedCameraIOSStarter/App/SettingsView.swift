@@ -1,15 +1,18 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("useAppleIntelligenceCoach") private var useAppleIntelligence = false
-    @AppStorage("captureFormat") private var captureFormat = CaptureFormat.heif.rawValue
-    @AppStorage("preferProRAW") private var preferProRAW = true
-    @AppStorage("showCompositionGrid") private var showGrid = true
-    @AppStorage("cameraHapticsEnabled") private var hapticsEnabled = true
+    @AppStorage("useAppleIntelligenceCoach") private var intelligence = false
+    @AppStorage("captureFormat") private var format = CaptureFormat.heif.rawValue
+    @AppStorage("captureAspect") private var aspect = CaptureAspect.standard.rawValue
+    @AppStorage("captureTimer") private var timer = 0
+    @AppStorage("preferProRAW") private var proRAW = true
+    @AppStorage("showCompositionGrid") private var grid = true
+    @AppStorage("showHorizonLevel") private var level = true
+    @AppStorage("cameraHapticsEnabled") private var haptics = true
     @State private var modelState = CompositionCoach.foundationModelState
-
     let supportsRaw: Bool
     let supportsProRAW: Bool
 
@@ -17,112 +20,66 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    Toggle("On-Device AI Composition Coach (Apple Intelligence)", isOn: $useAppleIntelligence)
-                        .disabled(modelState != .available)
-                    Label {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(modelStatusTitle)
-                                .font(.subheadline.weight(.medium))
-                            Text(modelStatusDetail)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    } icon: {
-                        Image(systemName: modelState == .available ? "checkmark.circle.fill" : "info.circle")
-                            .foregroundStyle(modelState == .available ? .green : .secondary)
-                    }
-                    .padding(.vertical, 3)
-                } header: {
-                    Text("Composition")
-                } footer: {
-                    Text("Vision finds framing cues on-device. When enabled, Apple Intelligence receives only coarse framing measurements after you tap Guide. No photo is sent to a server, and the coach never runs continuously.")
+                    Toggle("Apple Intelligence", isOn: $intelligence).disabled(modelState != .available)
+                    Text(modelStatus).font(.footnote).foregroundStyle(.secondary)
+                    Toggle("Grid", isOn: $grid)
+                    Toggle("Horizon level", isOn: $level)
+                } header: { Text("Composition") } footer: {
+                    Text("The viewfinder Guide uses on-device Vision. Optional Apple Intelligence adds wording when you refresh a suggestion.")
                 }
-
-                captureSection
-
-                Section("Privacy") {
-                    Label("Camera analysis stays on this iPhone", systemImage: "lock.shield")
-                    Text("Still does not use a third-party image service. Photos access is requested only when you save a capture.")
+                Section {
+                    Picker("Photo format", selection: $format) {
+                        Text("HEIF / JPEG").tag(CaptureFormat.heif.rawValue)
+                        if supportsRaw { Text("RAW + photo").tag(CaptureFormat.raw.rawValue) }
+                    }
+                    if supportsRaw { Toggle("Prefer Apple ProRAW", isOn: $proRAW).disabled(!supportsProRAW) }
+                    Picker("Framing", selection: $aspect) { ForEach(CaptureAspect.allCases) { Text($0.rawValue).tag($0.rawValue) } }
+                    Picker("Timer", selection: $timer) {
+                        Text("Off").tag(0); Text("3 seconds").tag(3); Text("10 seconds").tag(10)
+                    }
+                    Toggle("Haptic feedback", isOn: $haptics)
+                } header: { Text("Capture") } footer: {
+                    Text("RAW availability changes with the active camera. Originals and edit settings stay in Still until you delete them.")
+                }
+                Section {
+                    LabeledContent("LiDAR depth", value: DepthSession.supported ? "Available" : "Unavailable")
+                    Text("Open exposure controls below the viewfinder, then the timer menu to use Depth Assist. It measures the surface at the center and uses a separate camera mode.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } header: { Text("Depth assistance") }
+                Section {
+                    Text("Camera analysis stays on your iPhone. Photos access is requested when you export. Import uses the system photo picker.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("About") {
-                    LabeledContent("Still", value: "Camera prototype")
-                    LabeledContent("Minimum iOS", value: "iOS 18")
-                }
+                    NavigationLink("Camera diagnostics") { DiagnosticsView() }
+                    LabeledContent("iOS", value: UIDevice.current.systemVersion)
+                    LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1")
+                } header: { Text("About & support") }
             }
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
+            .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
-        .tint(Color(red: 0.78, green: 0.64, blue: 0.40))
+        .tint(.white).preferredColorScheme(.dark)
         .onAppear { modelState = CompositionCoach.foundationModelState }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { modelState = CompositionCoach.foundationModelState }
-        }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { modelState = CompositionCoach.foundationModelState } }
     }
 
-    private var captureSection: some View {
-        Section {
-            Group {
-                if supportsRaw {
-                    Picker("Photo format", selection: $captureFormat) {
-                        Text("HEIF").tag(CaptureFormat.heif.rawValue)
-                        Text("RAW + HEIF").tag(CaptureFormat.raw.rawValue)
-                    }
-                    .pickerStyle(.menu)
-                    .onChange(of: captureFormat) { _, value in
-                        if value == CaptureFormat.raw.rawValue { preferProRAW = true }
-                    }
-                } else {
-                    LabeledContent("Photo format", value: "HEIF")
-                }
-            }
-
-            if supportsRaw && captureFormat == CaptureFormat.raw.rawValue {
-                Toggle("Prefer Apple ProRAW when available", isOn: $preferProRAW)
-                    .disabled(!supportsProRAW)
-            }
-            Toggle("Rule-of-thirds grid", isOn: $showGrid)
-            Toggle("Haptic feedback", isOn: $hapticsEnabled)
-        } header: {
-            Text("Capture")
-        } footer: {
-            Text("RAW support depends on the camera hardware and active capture format. When ProRAW is unavailable, Still uses a supported RAW format with a processed HEIF preview.")
-        }
-    }
-
-    private var modelStatusTitle: String {
+    private var modelStatus: String {
         switch modelState {
-        case .available: return "Available on this iPhone"
-        case .requiresNewerOS: return "Requires a newer iOS version"
-        case .appleIntelligenceOff: return "Apple Intelligence is turned off"
-        case .modelPreparing: return "Apple’s on-device model is preparing"
-        case .unsupportedLanguage: return "Current language isn’t supported"
-        case .unavailable: return "Apple Intelligence is unavailable"
+        case .available: return "On-device model ready."
+        case .requiresNewerOS: return "Apple Intelligence guidance requires iOS 26 or later. Vision guidance remains available."
+        case .appleIntelligenceOff: return "Enable Apple Intelligence in iPhone Settings to use this option."
+        case .modelPreparing: return "The model is downloading or preparing. Vision guidance is available."
+        case .unsupportedLanguage: return "This iPhone language is not supported by the model."
+        case .unavailable: return "The model is unavailable. Vision guidance is available."
         }
     }
+}
 
-    private var modelStatusDetail: String {
-        switch modelState {
-        case .available:
-            return "On-device composition suggestions are ready when requested."
-        case .requiresNewerOS:
-            return "This option requires iOS 26 or later. Standard Vision framing guidance works on iOS 18 and later."
-        case .appleIntelligenceOff:
-            return "Turn on Apple Intelligence in iPhone Settings. Standard Vision guidance remains available."
-        case .modelPreparing:
-            return "Try again later. Standard Vision guidance remains available."
-        case .unsupportedLanguage:
-            return "Choose a supported iPhone language to enable the optional on-device model."
-        case .unavailable:
-            return "Standard Vision framing guidance remains available on this iPhone."
-        }
+private struct DiagnosticsView: View {
+    @State private var report = ""
+    var body: some View {
+        ScrollView { Text(report).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding() }
+            .navigationTitle("Diagnostics")
+            .toolbar { ShareLink(item: report) { Label("Share", systemImage: "square.and.arrow.up") } }
+            .onAppear { report = CameraDiagnostics.shared.report() }
     }
 }
