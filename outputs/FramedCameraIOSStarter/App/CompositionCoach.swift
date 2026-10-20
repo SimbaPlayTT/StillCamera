@@ -71,16 +71,22 @@ enum CompositionCoach {
         let face = faceRequest.results?.max { first, second in
             area(of: first.boundingBox) < area(of: second.boundingBox)
         }
-        let pose = poseRequest.results?.max { first, second in
-            area(of: first.boundingBox) < area(of: second.boundingBox)
+        let poseObservations = poseRequest.results ?? []
+        let poseCandidates = poseObservations.compactMap { observation -> (observation: VNHumanBodyPoseObservation, bounds: CGRect)? in
+            guard let bounds = bodyBounds(for: observation) else { return nil }
+            return (observation: observation, bounds: bounds)
         }
+        let largestPose = poseCandidates.max { first, second in
+            area(of: first.bounds) < area(of: second.bounds)
+        }
+        let poseBounds = largestPose?.bounds
         let salientObjects = saliencyRequest.results?.first?.salientObjects
         let salientObject = salientObjects?.max { first, second in
             area(of: first.boundingBox) < area(of: second.boundingBox)
         }
         let salient = salientObject?.boundingBox
         let rectangle = rectangleRequest.results?.first?.boundingBox
-        let visionBox = face?.boundingBox ?? pose?.boundingBox ?? salient ?? rectangle
+        let visionBox = face?.boundingBox ?? poseBounds ?? salient ?? rectangle
         let screenBox = visionBox.map(toTopLeftCoordinates)
         let center = screenBox.map { CGPoint(x: $0.midX, y: $0.midY) }
 
@@ -89,7 +95,7 @@ enum CompositionCoach {
             subjectCenter: center,
             suggestedAdjustment: heuristic(for: center),
             detectedFace: face != nil,
-            detectedPose: pose != nil
+            detectedPose: largestPose != nil
         )
     }
 
@@ -143,6 +149,27 @@ enum CompositionCoach {
 
     private static func area(of rect: CGRect) -> CGFloat {
         rect.width * rect.height
+    }
+
+    private static func bodyBounds(for observation: VNHumanBodyPoseObservation) -> CGRect? {
+        guard let recognizedPoints = try? observation.recognizedPoints(.all) else { return nil }
+        let locations = recognizedPoints.values
+            .filter { $0.confidence > 0.1 }
+            .map(\.location)
+        guard let firstLocation = locations.first else { return nil }
+
+        var minX = firstLocation.x
+        var minY = firstLocation.y
+        var maxX = firstLocation.x
+        var maxY = firstLocation.y
+        for location in locations.dropFirst() {
+            minX = min(minX, location.x)
+            minY = min(minY, location.y)
+            maxX = max(maxX, location.x)
+            maxY = max(maxY, location.y)
+        }
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
     private static func toTopLeftCoordinates(_ rect: CGRect) -> CGRect {
