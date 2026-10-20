@@ -1,5 +1,5 @@
 import SwiftUI
-+
+
 private struct FilmLookThumbnail: View {
     let entry: LibraryPhoto
     let name: String
