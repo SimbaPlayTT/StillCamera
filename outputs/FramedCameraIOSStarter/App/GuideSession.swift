@@ -279,14 +279,14 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
                         let p = arFrame.camera.projectPoint($0, orientation: .portrait, viewportSize: viewport)
                         return CGPoint(x: p.x / viewport.width, y: p.y / viewport.height)
                     }
-                    // A nearer occluder must never trigger a photo of a different subject.
+                    // The selected surface must still be at the expected depth.
                     if let worldSubject {
                         let projected = arFrame.camera.projectPoint(worldSubject, orientation: .portrait, viewportSize: viewport)
                         let point = CGPoint(x: projected.x / viewport.width, y: projected.y / viewport.height)
                         let local = inverse * SIMD4<Float>(worldSubject, 1)
                         let expected = -local.z
                         if let observed = depth(at: point, frame: arFrame) {
-                            if expected - observed > max(0.35, expected * 0.2) { trusted = false }
+                            if abs(expected - observed) > max(0.35, expected * 0.2) { trusted = false }
                         } else { trusted = false }
                     }
                 } else {
@@ -545,7 +545,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         motion.deviceMotionUpdateInterval = 1 / 15
         motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
             guard let data else { return }
-            let angle = CGFloat(atan2(data.gravity.x, -data.gravity.y))
+            let angle = CameraMath.horizon(gravityX: data.gravity.x, gravityY: data.gravity.y)
             let r = data.rotationRate, a = data.userAcceleration
             let steady = r.x * r.x + r.y * r.y + r.z * r.z < 0.0144 &&
                 a.x * a.x + a.y * a.y + a.z * a.z < 0.0064

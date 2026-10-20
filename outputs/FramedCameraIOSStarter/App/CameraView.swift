@@ -212,6 +212,7 @@ struct CameraView: View {
                 Slider(value: Binding(get: { Double(camera.exposureBias) }, set: { camera.setExposureBias(Float($0)) }),
                     in: Double(camera.exposureRange.lowerBound)...Double(camera.exposureRange.upperBound))
                     .accessibilityLabel("Exposure compensation")
+                    .disabled(camera.exposureIsManual)
                 Text(String(format: "%+.1f", camera.exposureBias)).font(.caption.monospaced()).frame(width: 40)
             }
             HStack {

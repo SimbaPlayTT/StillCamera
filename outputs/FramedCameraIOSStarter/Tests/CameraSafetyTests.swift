@@ -26,6 +26,13 @@ final class CameraSafetyTests: XCTestCase {
         XCTAssertEqual(CameraMath.clamp(99, minimum: 0.5, maximum: 10), 10)
     }
 
+    func testOverheadFlatLayDoesNotInventAHorizonTilt() {
+        XCTAssertEqual(CameraMath.horizon(gravityX: 0.01, gravityY: -0.02), 0)
+        XCTAssertEqual(CameraMath.horizon(gravityX: 0, gravityY: -1), 0)
+        XCTAssertGreaterThan(CameraMath.horizon(gravityX: 0.2, gravityY: -0.98), 0.05)
+        XCTAssertEqual(CameraMath.horizon(gravityX: .nan, gravityY: 0), 0)
+    }
+
     func testAspectFillCoordinateRoundTripIncludesCroppedEdges() {
         let image = CGSize(width: 300, height: 400), viewport = CGSize(width: 300, height: 300)
         let original = CGRect(x: 0.1, y: 0.2, width: 0.4, height: 0.5)

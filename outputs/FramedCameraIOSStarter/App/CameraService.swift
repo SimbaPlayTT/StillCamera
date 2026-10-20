@@ -237,11 +237,11 @@ final class CameraService: NSObject, ObservableObject {
         configureDevice(lock ? "AE/AF lock" : "focus") { device in
             let safe = CGPoint(x: min(max(point.x, 0), 1), y: min(max(point.y, 0), 1))
             if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = safe }
-            if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = safe }
+            if device.exposureMode != .custom && device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = safe }
             let focusMode: AVCaptureDevice.FocusMode = lock ? .locked : continuous ? .continuousAutoFocus : .autoFocus
             let exposureMode: AVCaptureDevice.ExposureMode = lock ? .locked : .continuousAutoExposure
             if device.isFocusModeSupported(focusMode) { device.focusMode = focusMode }
-            if device.isExposureModeSupported(exposureMode) { device.exposureMode = exposureMode }
+            if (device.exposureMode != .custom || lock) && device.isExposureModeSupported(exposureMode) { device.exposureMode = exposureMode }
         }
     }
 
@@ -505,7 +505,7 @@ final class CameraService: NSObject, ObservableObject {
         motion.deviceMotionUpdateInterval = 1 / 15
         motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
             guard let data else { return }
-            let roll = CGFloat(atan2(data.gravity.x, -data.gravity.y))
+            let roll = CameraMath.horizon(gravityX: data.gravity.x, gravityY: data.gravity.y)
             let next: CGFloat = abs(roll) < 0.015 ? 0 : roll
             if let self {
                 if abs(self.horizonAngle - next) > 0.006 { self.horizonAngle = next }

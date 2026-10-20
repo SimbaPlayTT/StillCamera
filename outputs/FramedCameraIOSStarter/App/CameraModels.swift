@@ -67,6 +67,11 @@ struct CapturedPhoto: Identifiable {
 }
 
 enum CameraMath {
+    static func horizon(gravityX x: Double, gravityY y: Double) -> CGFloat {
+        // A horizon is undefined when pointing almost straight up or down (for example a flat lay).
+        guard x.isFinite, y.isFinite, hypot(x, y) >= 0.3 else { return 0 }
+        return CGFloat(atan2(x, -y))
+    }
     static func clamp(_ value: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
         guard value.isFinite, minimum.isFinite, maximum.isFinite, minimum <= maximum else { return minimum }
         return min(max(value, minimum), maximum)
