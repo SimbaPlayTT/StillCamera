@@ -88,8 +88,17 @@ jobs:
             -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
             -maximum-test-execution-time-allowance 120 \
             -resultBundlePath "$RUNNER_TEMP/Tests.xcresult" \
-            test CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            test CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
             2>&1 | tee "$RUNNER_TEMP/tests.log"
+
+      - name: Summarize simulator results
+        if: always()
+        shell: bash
+        run: |
+          if [ -d "$RUNNER_TEMP/Tests.xcresult" ]; then
+            xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/Tests.xcresult" > "$RUNNER_TEMP/TestSummary.json" || true
+            cat "$RUNNER_TEMP/TestSummary.json"
+          fi
 
       - name: Launch app in simulator and capture screen
         shell: bash
@@ -138,5 +147,6 @@ jobs:
             ${{ runner.temp }}/Archive.xcresult
             ${{ runner.temp }}/Tests.xcresult
             ${{ runner.temp }}/Simulator.png
+            ${{ runner.temp }}/TestSummary.json
           if-no-files-found: warn
           retention-days: 14

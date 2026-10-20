@@ -75,9 +75,9 @@ final class CameraService: NSObject, ObservableObject {
     override init() {
         super.init()
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(runtimeError(_:)), name: .AVCaptureSessionRuntimeError, object: session)
-        center.addObserver(self, selector: #selector(interrupted(_:)), name: .AVCaptureSessionWasInterrupted, object: session)
-        center.addObserver(self, selector: #selector(interruptionEnded), name: .AVCaptureSessionInterruptionEnded, object: session)
+        center.addObserver(self, selector: #selector(runtimeError(_:)), name: AVCaptureSession.runtimeErrorNotification, object: session)
+        center.addObserver(self, selector: #selector(interrupted(_:)), name: AVCaptureSession.wasInterruptedNotification, object: session)
+        center.addObserver(self, selector: #selector(interruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: session)
         center.addObserver(self, selector: #selector(background), name: UIApplication.didEnterBackgroundNotification, object: nil)
         center.addObserver(self, selector: #selector(foreground), name: UIApplication.willEnterForegroundNotification, object: nil)
     }
@@ -384,7 +384,7 @@ final class CameraService: NSObject, ObservableObject {
             self?.sessionQueue.async { self?.publishCapabilities() }
         }, device.observe(\.isTorchAvailable, options: [.new]) { [weak self] _, _ in
             self?.sessionQueue.async { self?.publishCapabilities() }
-        }, device.observe(\.activePrimaryConstituentDevice, options: [.new]) { [weak self] _, _ in
+        }, device.observe(\.activePrimaryConstituent, options: [.new]) { [weak self] _, _ in
             self?.sessionQueue.async { self?.publishCapabilities() }
         }]
         publishCapabilities()
