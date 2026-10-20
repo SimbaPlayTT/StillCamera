@@ -11,16 +11,16 @@ struct CameraView: View {
     @StateObject private var library = PhotoLibraryStore()
     @AppStorage("showCompositionGrid") private var grid = true
     @AppStorage("showHorizonLevel") private var showLevel = true
-    @AppStorage("useAppleIntelligenceCoach") private var intelligence = false
     @AppStorage("captureFormat") private var format = CaptureFormat.heif.rawValue
     @AppStorage("captureAspect") private var aspectValue = CaptureAspect.standard.rawValue
     @AppStorage("captureTimer") private var timerSeconds = 0
     @AppStorage("preferProRAW") private var proRAW = true
     @AppStorage("cameraHapticsEnabled") private var haptics = true
+    @AppStorage("reviewAfterCapture") private var reviewAfterCapture = false
     @State private var sheet: Sheet?
     @State private var depthPresented = false
-    @State private var guide = false
-    @State private var drawFrame = false
+    @State private var guidedPresented = false
+    @State private var guidedPhoto: CapturedPhoto?
     @State private var adjustments = false
     @State private var flash: AVCaptureDevice.FlashMode = .off
     @State private var focusPoint: CGPoint?
@@ -28,31 +28,11 @@ struct CameraView: View {
     @State private var pinchStart: CGFloat?
     @State private var countdown: Int?
     @State private var timerTask: Task<Void, Never>?
-    @State private var coachTask: Task<Void, Never>?
-    @State private var coachText: String?
     @State private var manualISO: Float = 0
     @State private var manualShutter: Double = 0
     @State private var storingCapture = false
-    @State private var userFrame = CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.5)
     private var aspect: CaptureAspect { CaptureAspect(rawValue: aspectValue) ?? .standard }
-    private var ready: Bool { camera.phase == .running && !storingCapture && countdown == nil && camera.capturedPhoto == nil }
-    private var framedObservation: CompositionObservation {
-        let unit = CGSize(width: aspect.ratio, height: 1)
-        let bounds = camera.compositionObservation.subjectBounds.map {
-            CameraMath.viewRect($0, imageSize: camera.imageSize, viewSize: unit)
-        }
-        let center = bounds.map { CGPoint(x: $0.midX / unit.width, y: $0.midY) }
-        return CompositionObservation(subjectBounds: bounds, subjectCenter: center, horizonAngle: camera.horizonAngle,
-            suggestedAdjustment: bounds == nil ? camera.compositionObservation.suggestedAdjustment :
-                abs(camera.horizonAngle) > 0.06 ? "Level the camera." : CompositionCoach.heuristic(for: center),
-            detectedFace: camera.compositionObservation.detectedFace, detectedPose: camera.compositionObservation.detectedPose)
-    }
-    private var aligned: Bool {
-        guard guide, let point = framedObservation.subjectCenter else { return false }
-        let third = min(abs(point.x - 1 / 3), abs(point.x - 2 / 3))
-        return third < 0.055 && point.y > 0.2 && point.y < 0.8 && abs(camera.horizonAngle) < 0.035
-    }
-
+    private var ready: Bool { camera.phase == .running && !storingCapture && countdown == nil && camera.capturedPhoto == nil && guidedPhoto == nil }
     var body: some View {
         GeometryReader { geometry in
             let reserve: CGFloat = adjustments ? 320 : 205
@@ -65,7 +45,7 @@ struct CameraView: View {
                 Spacer(minLength: 0)
                 if adjustments { adjustmentPanel }
                 CameraControlsOverlay(ready: ready, capturing: camera.isCapturing || storingCapture,
-                    latestThumbnail: library.photos.first?.thumbnailURL, guideEnabled: guide, aligned: aligned,
+                    latestThumbnail: library.photos.first?.thumbnailURL, guideEnabled: false, aligned: false,
                     onCapture: shutter, onSwitch: switchCamera, onLibrary: { present(.library) },
                     onGuide: toggleGuide, onAdjust: { withAnimation(.easeInOut(duration: 0.2)) { adjustments.toggle() } })
             }
@@ -75,11 +55,10 @@ struct CameraView: View {
         .onAppear { camera.start() }
         .onDisappear { cancelWork(); camera.stop() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active && sheet == nil && !depthPresented { camera.start(); camera.setAnalysisEnabled(guide) }
+            if phase == .active && sheet == nil && !depthPresented && !guidedPresented { camera.start() }
             else if phase != .active { cancelWork(); camera.stop() }
         }
         .onChange(of: camera.supportsRaw) { _, raw in if !raw { format = CaptureFormat.heif.rawValue } }
-        .onChange(of: camera.currentZoomFactor) { _, _ in coachTask?.cancel(); coachText = nil }
         .onChange(of: flash) { _, value in
             if value != .off && camera.torchOn { camera.setTorch(false) }
         }
@@ -96,11 +75,23 @@ struct CameraView: View {
         .fullScreenCover(isPresented: $depthPresented, onDismiss: {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { resume() }
         }) { DepthAssistView() }
+        .fullScreenCover(isPresented: $guidedPresented, onDismiss: {
+            if let photo = guidedPhoto { guidedPhoto = nil; keepPhoto(photo) }
+            resume()
+        }) {
+            GuidedCameraView(onClose: { guidedPresented = false }, onPhoto: { photo in
+                guidedPhoto = photo; guidedPresented = false
+            })
+        }
         .alert("Camera", isPresented: Binding(get: { camera.message != nil || library.error != nil }, set: {
             if !$0 { camera.dismissMessage(); library.error = nil }
         })) {
             Button("OK") { camera.dismissMessage(); library.error = nil }
             if camera.capturedPhoto != nil && !storingCapture { Button("Retry keeping photo") { keepCapture() } }
+            if let photo = guidedPhoto, !storingCapture {
+                Button("Retry keeping guided photo") { keepPhoto(photo) }
+                Button("Discard unsaved guided photo", role: .destructive) { guidedPhoto = nil; library.error = nil }
+            }
             if camera.capturedPhoto != nil && !storingCapture {
                 Button("Discard unsaved capture", role: .destructive) { camera.clearCapturedPhoto(); library.error = nil; camera.dismissMessage() }
             }
@@ -146,7 +137,7 @@ struct CameraView: View {
     private func viewfinder(size: CGSize) -> some View {
         ZStack {
             CameraPreview(session: camera.session, mirrored: camera.isFrontCamera) { local, device, locked in
-                guard ready, !drawFrame else { return }
+                guard ready else { return }
                 camera.focus(at: device, lock: locked)
                 focusPoint = local
                 let token = UUID(); focusID = token
@@ -154,24 +145,11 @@ struct CameraView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { if focusID == token { focusPoint = nil } }
             }
             .simultaneousGesture(MagnifyGesture().onChanged { value in
-                guard ready, !drawFrame else { return }
+                guard ready else { return }
                 if pinchStart == nil { pinchStart = camera.currentZoomFactor }
                 camera.setZoomFactor((pinchStart ?? camera.currentZoomFactor) * value.magnification)
             }.onEnded { _ in pinchStart = nil })
             if grid { ThirdsGrid().allowsHitTesting(false) }
-            if guide, let bounds = camera.compositionObservation.subjectBounds, !drawFrame {
-                let box = CameraMath.viewRect(bounds, imageSize: camera.imageSize, viewSize: size)
-                RoundedRectangle(cornerRadius: 2).stroke(.yellow.opacity(0.8), lineWidth: 1)
-                    .frame(width: max(2, box.width), height: max(2, box.height)).position(x: box.midX, y: box.midY)
-                    .allowsHitTesting(false)
-            }
-            if drawFrame {
-                FrameSelection(rect: $userFrame) {
-                    let rect = CGRect(x: userFrame.minX * size.width, y: userFrame.minY * size.height,
-                        width: userFrame.width * size.width, height: userFrame.height * size.height)
-                    camera.trackSubject(in: CameraMath.imageRect(rect, imageSize: camera.imageSize, viewSize: size))
-                }
-            }
             if let focusPoint {
                 Rectangle().stroke(.yellow, lineWidth: 1.2).frame(width: 62, height: 62)
                     .position(focusPoint).allowsHitTesting(false)
@@ -180,21 +158,6 @@ struct CameraView: View {
                 HStack {
                     if camera.exposureLocked { Text("AE/AF LOCK").font(.caption2.monospaced()).foregroundStyle(.yellow) }
                     Spacer()
-                    if guide {
-                        Button { drawFrame.toggle(); coachText = nil } label: {
-                            Label(drawFrame ? "Track" : "Select", systemImage: drawFrame ? "checkmark" : "crop")
-                                .font(.caption).padding(10).background(.black.opacity(0.65), in: Capsule())
-                        }.accessibilityLabel(drawFrame ? "Track selected frame" : "Select and resize your own frame")
-                    }
-                }
-                if guide {
-                    HStack(spacing: 8) {
-                        Text(drawFrame ? "Drag to select. Move the box or resize its corner." : coachText ?? framedObservation.suggestedAdjustment)
-                            .font(.caption).lineLimit(2)
-                        Spacer(minLength: 0)
-                        Button { requestCoach() } label: { Image(systemName: "arrow.clockwise").frame(width: 36, height: 36) }
-                            .accessibilityLabel("Refresh framing suggestion")
-                    }.padding(.leading, 10).background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 6))
                 }
                 Spacer()
                 if showLevel && abs(camera.horizonAngle) < 0.18 {
@@ -310,32 +273,36 @@ struct CameraView: View {
             do {
                 let entry = try await library.add(photo)
                 camera.clearCapturedPhoto()
-                present(.editor(entry))
+                if reviewAfterCapture { present(.editor(entry)) }
             } catch { library.error = error.localizedDescription }
+            storingCapture = false
+        }
+    }
+    private func keepPhoto(_ photo: CapturedPhoto) {
+        guard !storingCapture else { return }
+        storingCapture = true
+        Task {
+            do {
+                let entry = try await library.add(photo)
+                guidedPhoto = nil
+                if reviewAfterCapture { present(.editor(entry)) }
+            } catch {
+                // Preserve the captured bytes so a disk error can be retried or explicitly discarded.
+                guidedPhoto = photo
+                library.error = error.localizedDescription
+            }
             storingCapture = false
         }
     }
     private func switchCamera() {
         guard ready else { return }
-        coachTask?.cancel(); coachText = nil; drawFrame = false; manualISO = 0; manualShutter = 0
+        manualISO = 0; manualShutter = 0
         camera.switchCamera()
     }
     private func toggleGuide() {
-        guide.toggle(); coachText = nil; drawFrame = false; coachTask?.cancel()
-        camera.setAnalysisEnabled(guide)
-        if guide { requestCoach() }
-    }
-    private func requestCoach() {
-        coachTask?.cancel(); coachText = nil
-        guard intelligence, CompositionCoach.foundationModelState == .available,
-              camera.compositionObservation.subjectCenter != nil else { return }
-        let observation = framedObservation
-        coachTask = Task { @MainActor in
-            do {
-                let result = try await CompositionCoach.onDeviceSuggestion(for: observation)
-                try Task.checkCancellation(); coachText = result
-            } catch { if !Task.isCancelled { coachText = observation.suggestedAdjustment } }
-        }
+        guard ready else { return }
+        cancelWork(); camera.setAnalysisEnabled(false)
+        camera.stop { guidedPresented = true }
     }
     private func present(_ target: Sheet) {
         cancelWork(); camera.setAnalysisEnabled(false)
@@ -347,9 +314,9 @@ struct CameraView: View {
         camera.stop { depthPresented = true }
     }
     private func resume() {
-        if scenePhase == .active && !depthPresented { camera.start(); camera.setAnalysisEnabled(guide) }
+        if scenePhase == .active && !depthPresented && !guidedPresented { camera.start() }
     }
-    private func cancelWork() { timerTask?.cancel(); timerTask = nil; countdown = nil; coachTask?.cancel(); coachText = nil }
+    private func cancelWork() { timerTask?.cancel(); timerTask = nil; countdown = nil }
     private func haptic() { if haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
 }
 
@@ -363,46 +330,5 @@ private struct ThirdsGrid: View {
                 }
             }.stroke(.white.opacity(0.3), lineWidth: 0.5)
         }
-    }
-}
-
-private struct FrameSelection: View {
-    @Binding var rect: CGRect
-    let onCommit: () -> Void
-    @State private var startRect: CGRect?
-    var body: some View {
-        GeometryReader { proxy in
-            Color.clear.contentShape(Rectangle()).gesture(DragGesture(minimumDistance: 8).onChanged { value in
-                let start = value.startLocation, end = value.location
-                rect = constrained(CGRect(x: min(start.x, end.x) / proxy.size.width, y: min(start.y, end.y) / proxy.size.height,
-                    width: abs(end.x - start.x) / proxy.size.width, height: abs(end.y - start.y) / proxy.size.height))
-            }.onEnded { _ in onCommit() })
-            Rectangle().stroke(.yellow, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                .background(.yellow.opacity(0.05)).contentShape(Rectangle())
-                .frame(width: rect.width * proxy.size.width, height: rect.height * proxy.size.height)
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left").font(.caption).padding(10).background(.black.opacity(0.7))
-                        .gesture(DragGesture().onChanged { value in
-                            if startRect == nil { startRect = rect }
-                            if let startRect {
-                                rect = constrained(CGRect(origin: startRect.origin, size: CGSize(
-                                    width: startRect.width + value.translation.width / proxy.size.width,
-                                    height: startRect.height + value.translation.height / proxy.size.height)))
-                            }
-                        }.onEnded { _ in startRect = nil; onCommit() })
-                }
-                .position(x: rect.midX * proxy.size.width, y: rect.midY * proxy.size.height)
-                .gesture(DragGesture().onChanged { value in
-                    if startRect == nil { startRect = rect }
-                    if let startRect {
-                        rect = constrained(startRect.offsetBy(dx: value.translation.width / proxy.size.width,
-                            dy: value.translation.height / proxy.size.height))
-                    }
-                }.onEnded { _ in startRect = nil; onCommit() })
-        }
-    }
-    private func constrained(_ value: CGRect) -> CGRect {
-        let width = min(max(value.width, 0.08), 0.95), height = min(max(value.height, 0.08), 0.95)
-        return CGRect(x: min(max(value.minX, 0), 1 - width), y: min(max(value.minY, 0), 1 - height), width: width, height: height)
     }
 }

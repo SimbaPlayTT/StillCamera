@@ -53,6 +53,7 @@ final class CameraService: NSObject, ObservableObject {
     private var pending: PendingCapture?
     private let analysisLock = NSLock()
     private var analysisEnabled = false
+    private var guideFrameHandler: ((CVPixelBuffer) -> Void)?
     private var requestedTarget: CGRect?
     private var targetRevision = 0
     // The following fields are only touched on analysisQueue.
@@ -130,8 +131,60 @@ final class CameraService: NSObject, ObservableObject {
         analysisEnabled = enabled
         if !enabled { requestedTarget = nil; targetRevision += 1 }
         analysisLock.unlock()
-        sessionQueue.async { [weak self] in self?.videoOutput.connection(with: .video)?.isEnabled = enabled }
+        updateFrameDelivery()
         if !enabled { DispatchQueue.main.async { self.compositionObservation = .neutral } }
+    }
+
+    /// The consumer must drop busy frames; it must never retain a queue of camera buffers.
+    func setGuideFrameHandler(_ handler: ((CVPixelBuffer) -> Void)?) {
+        analysisLock.lock(); guideFrameHandler = handler; analysisLock.unlock()
+        updateFrameDelivery()
+    }
+
+    private func updateFrameDelivery() {
+        analysisLock.lock(); let enabled = analysisEnabled || guideFrameHandler != nil; analysisLock.unlock()
+        sessionQueue.async { [weak self] in self?.videoOutput.connection(with: .video)?.isEnabled = enabled }
+    }
+
+    func rampGuidedZoom(to displayFactor: CGFloat, completion: @escaping (CGFloat, Bool) -> Void) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.state == .running, let device = self.input?.device else {
+                DispatchQueue.main.async { completion(1, false) }; return
+            }
+            do {
+                try device.lockForConfiguration()
+                let value = CameraMath.clamp(displayFactor / self.zoomMultiplier,
+                    minimum: device.minAvailableVideoZoomFactor,
+                    maximum: min(device.maxAvailableVideoZoomFactor, 4 / self.zoomMultiplier))
+                device.cancelVideoZoomRamp()
+                device.ramp(toVideoZoomFactor: value, withRate: 4)
+                device.unlockForConfiguration()
+                self.awaitGuidedReadiness(deadline: CACurrentMediaTime() + 3, completion: completion)
+            } catch { DispatchQueue.main.async { completion(1, false) } }
+        }
+    }
+
+    func checkGuidedReadiness(_ completion: @escaping (Bool) -> Void) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.input?.device else { DispatchQueue.main.async { completion(false) }; return }
+            let ready = self.state == .running && self.session.isRunning && self.pending == nil &&
+                !device.isRampingVideoZoom && !device.isAdjustingFocus && !device.isAdjustingExposure
+            DispatchQueue.main.async { completion(ready) }
+        }
+    }
+
+    private func awaitGuidedReadiness(deadline: CFTimeInterval, completion: @escaping (CGFloat, Bool) -> Void) {
+        guard state == .running, let device = input?.device else { DispatchQueue.main.async { completion(1, false) }; return }
+        let zoom = device.videoZoomFactor * zoomMultiplier
+        if !device.isRampingVideoZoom && !device.isAdjustingFocus && !device.isAdjustingExposure {
+            publishCapabilities(); DispatchQueue.main.async { completion(zoom, true) }; return
+        }
+        if CACurrentMediaTime() >= deadline {
+            publishCapabilities(); DispatchQueue.main.async { completion(zoom, false) }; return
+        }
+        sessionQueue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.awaitGuidedReadiness(deadline: deadline, completion: completion)
+        }
     }
 
     func trackSubject(in bounds: CGRect?) {
@@ -377,7 +430,7 @@ final class CameraService: NSObject, ObservableObject {
             }
         }
         analysisLock.lock()
-        let deliverFrames = analysisEnabled
+        let deliverFrames = analysisEnabled || guideFrameHandler != nil
         analysisLock.unlock()
         videoOutput.connection(with: .video)?.isEnabled = deliverFrames
         observations = [device.observe(\.isTorchActive, options: [.new]) { [weak self] _, _ in
@@ -450,7 +503,8 @@ final class CameraService: NSObject, ObservableObject {
         motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
             guard let data else { return }
             let roll = CGFloat(atan2(data.gravity.x, -data.gravity.y))
-            self?.horizonAngle = abs(roll) < 0.015 ? 0 : roll
+            let next: CGFloat = abs(roll) < 0.015 ? 0 : roll
+            if let self, abs(self.horizonAngle - next) > 0.006 { self.horizonAngle = next }
         }
     }
 
@@ -522,8 +576,9 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
 extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         analysisLock.lock()
-        let enabled = analysisEnabled, target = requestedTarget, revision = targetRevision
+        let enabled = analysisEnabled, target = requestedTarget, revision = targetRevision, guideHandler = guideFrameHandler
         analysisLock.unlock()
+        if let guideHandler, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) { guideHandler(buffer) }
         guard enabled else { return }
         let interval: Double = ProcessInfo.processInfo.isLowPowerModeEnabled || ProcessInfo.processInfo.thermalState != .nominal ? 1.4 : 0.6
         let now = CACurrentMediaTime()

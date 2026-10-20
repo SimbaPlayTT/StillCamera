@@ -19,11 +19,13 @@ struct CameraControlsOverlay: View {
                 Button(action: onAdjust) { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44) }
                     .accessibilityLabel("Exposure and capture controls")
                 Spacer()
-                Text("PHOTO").font(.caption.weight(.semibold)).tracking(1.5).foregroundStyle(.yellow)
+                HStack(spacing: 23) {
+                    Text("PHOTO").foregroundStyle(.yellow)
+                    Button("GUIDE", action: onGuide).disabled(!ready || capturing)
+                        .accessibilityLabel("Find and lock a guided composition")
+                }.font(.system(size: 11, weight: .semibold)).tracking(1.5)
                 Spacer()
-                Button(action: onGuide) {
-                    Image(systemName: "viewfinder").foregroundStyle(guideEnabled ? .yellow : .white).frame(width: 44, height: 44)
-                }.accessibilityLabel(guideEnabled ? "Turn composition guide off" : "Turn composition guide on")
+                Color.clear.frame(width: 44, height: 44)
             }
             HStack {
                 Button(action: onLibrary) {

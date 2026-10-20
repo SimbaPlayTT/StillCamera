@@ -99,6 +99,23 @@ enum CompositionCoach {
     }
 
     @MainActor
+    static func interpretIntent(_ prompt: String) async throws -> GuideStyle {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *), foundationModelState == .available else { throw CoachError.modelUnavailable }
+        let allowed = GuideStyle.allCases.map(\.rawValue).joined(separator: ", ")
+        let session = LanguageModelSession(instructions: "Classify the user's photography preference. Return exactly one label from: \(allowed). Return no explanation. This is a composition preference, not a request to browse the internet.")
+        try Task.checkCancellation()
+        let response = try await session.respond(to: String(prompt.prefix(240)))
+        try Task.checkCancellation()
+        let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let style = GuideStyle.allCases.first(where: { text == $0.rawValue.lowercased() }) else { throw CoachError.emptyResponse }
+        return style
+        #else
+        throw CoachError.modelUnavailable
+        #endif
+    }
+
+    @MainActor
     static func onDeviceSuggestion(for observation: CompositionObservation) async throws -> String {
         #if canImport(FoundationModels)
         guard #available(iOS 26.0, *) else { throw CoachError.modelUnavailable }
