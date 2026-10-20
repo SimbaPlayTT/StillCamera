@@ -39,29 +39,7 @@ struct SettingsView: View {
                     Text("Vision finds framing cues on-device. When enabled, Apple Intelligence receives only coarse framing measurements after you tap Guide. No photo is sent to a server, and the coach never runs continuously.")
                 }
 
-                Section("Capture") {
-                    if supportsRaw {
-                        Picker("Photo format", selection: $captureFormat) {
-                            Text("HEIF").tag(CaptureFormat.heif.rawValue)
-                            Text("RAW + HEIF").tag(CaptureFormat.raw.rawValue)
-                        }
-                        .pickerStyle(.menu)
-                        .onChange(of: captureFormat) { _, value in
-                            if value == CaptureFormat.raw.rawValue { preferProRAW = true }
-                        }
-                    } else {
-                        LabeledContent("Photo format", value: "HEIF")
-                    }
-
-                    if supportsRaw && captureFormat == CaptureFormat.raw.rawValue {
-                        Toggle("Prefer Apple ProRAW when available", isOn: $preferProRAW)
-                            .disabled(!supportsProRAW)
-                    }
-                    Toggle("Rule-of-thirds grid", isOn: $showGrid)
-                    Toggle("Haptic feedback", isOn: $hapticsEnabled)
-                } footer: {
-                    Text("RAW support depends on the camera hardware and active capture format. When ProRAW is unavailable, Still uses a supported RAW format with a processed HEIF preview.")
-                }
+                captureSection
 
                 Section("Privacy") {
                     Label("Camera analysis stays on this iPhone", systemImage: "lock.shield")
@@ -87,6 +65,36 @@ struct SettingsView: View {
         .onAppear { modelState = CompositionCoach.foundationModelState }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { modelState = CompositionCoach.foundationModelState }
+        }
+    }
+
+    private var captureSection: some View {
+        Section {
+            Group {
+                if supportsRaw {
+                    Picker("Photo format", selection: $captureFormat) {
+                        Text("HEIF").tag(CaptureFormat.heif.rawValue)
+                        Text("RAW + HEIF").tag(CaptureFormat.raw.rawValue)
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: captureFormat) { _, value in
+                        if value == CaptureFormat.raw.rawValue { preferProRAW = true }
+                    }
+                } else {
+                    LabeledContent("Photo format", value: "HEIF")
+                }
+            }
+
+            if supportsRaw && captureFormat == CaptureFormat.raw.rawValue {
+                Toggle("Prefer Apple ProRAW when available", isOn: $preferProRAW)
+                    .disabled(!supportsProRAW)
+            }
+            Toggle("Rule-of-thirds grid", isOn: $showGrid)
+            Toggle("Haptic feedback", isOn: $hapticsEnabled)
+        } header: {
+            Text("Capture")
+        } footer: {
+            Text("RAW support depends on the camera hardware and active capture format. When ProRAW is unavailable, Still uses a supported RAW format with a processed HEIF preview.")
         }
     }
 

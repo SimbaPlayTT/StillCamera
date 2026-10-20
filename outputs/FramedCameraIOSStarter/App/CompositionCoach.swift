@@ -68,11 +68,17 @@ enum CompositionCoach {
             )
         }
 
-        let face = faceRequest.results?.max(by: { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height })
-        let pose = poseRequest.results?.max(by: { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height })
-        let salient = saliencyRequest.results?.first?.salientObjects
-            .max(by: { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height })?
-            .boundingBox
+        let face = faceRequest.results?.max { first, second in
+            area(of: first.boundingBox) < area(of: second.boundingBox)
+        }
+        let pose = poseRequest.results?.max { first, second in
+            area(of: first.boundingBox) < area(of: second.boundingBox)
+        }
+        let salientObjects = saliencyRequest.results?.first?.salientObjects
+        let salientObject = salientObjects?.max { first, second in
+            area(of: first.boundingBox) < area(of: second.boundingBox)
+        }
+        let salient = salientObject?.boundingBox
         let rectangle = rectangleRequest.results?.first?.boundingBox
         let visionBox = face?.boundingBox ?? pose?.boundingBox ?? salient ?? rectangle
         let screenBox = visionBox.map(toTopLeftCoordinates)
@@ -133,6 +139,10 @@ enum CompositionCoach {
         if center.y < 0.31 { return "Lower the frame a little." }
         if center.y > 0.69 { return "Raise the frame slightly." }
         return "Hold the frame and keep the horizon level."
+    }
+
+    private static func area(of rect: CGRect) -> CGFloat {
+        rect.width * rect.height
     }
 
     private static func toTopLeftCoordinates(_ rect: CGRect) -> CGRect {
