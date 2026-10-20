@@ -5,12 +5,24 @@ import UIKit
 actor PhotoRenderer {
     static let shared = PhotoRenderer()
     private let context = CIContext(options: [.cacheIntermediates: false])
+    private var lookThumbnails: [String: UIImage] = [:]
     static let looks = ["Original", "Daylight", "Amber", "Slate", "Silver"]
     static let frames = ["None", "Plain", "White", "Paper", "Black", "Negative", "Specs"]
 
-    func render(_ entry: LibraryPhoto, recipe: EditRecipe, maximumSide: CGFloat? = 1400) throws -> UIImage {
+    func lookThumbnail(_ entry: LibraryPhoto, look: String) throws -> UIImage {
+        let key = entry.id.uuidString + look + entry.recipe.aspect.rawValue
+        if let cached = lookThumbnails[key] { return cached }
+        var recipe = EditRecipe(); recipe.aspect = entry.recipe.aspect; recipe.look = look
+        let image = try render(entry, recipe: recipe, maximumSide: 160, thumbnailSource: true)
+        if lookThumbnails.count >= 20 { lookThumbnails.removeAll() }
+        lookThumbnails[key] = image
+        return image
+    }
+
+    func render(_ entry: LibraryPhoto, recipe: EditRecipe, maximumSide: CGFloat? = 1400,
+                thumbnailSource: Bool = false) throws -> UIImage {
         try Task.checkCancellation()
-        let url = entry.hasRaw ? entry.rawURL : entry.originalURL
+        let url = thumbnailSource ? entry.thumbnailURL : entry.hasRaw ? entry.rawURL : entry.originalURL
         guard var image = CIImage(contentsOf: url, options: [.applyOrientationProperty: true])
             ?? CIImage(contentsOf: entry.originalURL, options: [.applyOrientationProperty: true]) else { throw LibraryError.invalidImage }
         image = image.cropped(to: CameraMath.crop(in: image.extent, ratio: recipe.aspect.ratio))

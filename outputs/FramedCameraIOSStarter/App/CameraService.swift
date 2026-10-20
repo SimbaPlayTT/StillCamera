@@ -33,6 +33,7 @@ final class CameraService: NSObject, ObservableObject {
     @Published private(set) var actualISO: Float = 0
     @Published private(set) var actualExposure: Double = 0
     @Published private(set) var horizonAngle: CGFloat = 0
+    @Published private(set) var isDeviceSteady = true
     @Published private(set) var imageSize = CGSize(width: 3, height: 4)
     @Published private(set) var compositionObservation = CompositionObservation.neutral
     @Published private(set) var message: String?
@@ -422,6 +423,8 @@ final class CameraService: NSObject, ObservableObject {
         if let size = (balanced.isEmpty ? sizes : balanced).max(by: {
             Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
         }) { photoOutput.maxPhotoDimensions = size }
+        if photoOutput.isZeroShutterLagSupported { photoOutput.isZeroShutterLagEnabled = true }
+        if photoOutput.isFastCapturePrioritizationSupported { photoOutput.isFastCapturePrioritizationEnabled = true }
         for connection in [photoOutput.connection(with: .video), videoOutput.connection(with: .video)].compactMap({ $0 }) {
             if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
             if connection.isVideoMirroringSupported {
@@ -504,7 +507,13 @@ final class CameraService: NSObject, ObservableObject {
             guard let data else { return }
             let roll = CGFloat(atan2(data.gravity.x, -data.gravity.y))
             let next: CGFloat = abs(roll) < 0.015 ? 0 : roll
-            if let self, abs(self.horizonAngle - next) > 0.006 { self.horizonAngle = next }
+            if let self {
+                if abs(self.horizonAngle - next) > 0.006 { self.horizonAngle = next }
+                let r = data.rotationRate, a = data.userAcceleration
+                let steady = r.x * r.x + r.y * r.y + r.z * r.z < 0.0144 &&
+                    a.x * a.x + a.y * a.y + a.z * a.z < 0.0064
+                if self.isDeviceSteady != steady { self.isDeviceSteady = steady }
+            }
         }
     }
 

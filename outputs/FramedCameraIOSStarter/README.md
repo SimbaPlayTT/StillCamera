@@ -1,6 +1,6 @@
 # Still — native camera and photo library
 
-Still is a SwiftUI / AVFoundation iPhone app. Version 1.1 repairs the camera configuration, replaces the crowded prototype layout, adds a persistent photo library and adjustable editor, and introduces optional LiDAR depth assistance.
+Still is a SwiftUI / AVFoundation iPhone app. Version 1.2 adds composition selection, a frozen scene target, crosshair alignment, bounded automatic zoom and one automatic photo per scan. It retains manual capture, RAW, a persistent photo library and adjustable film-style editing.
 
 **Requested physical target: iPhone 17 Pro Max on iOS 27.0.** Minimum iOS remains 18. Apple Intelligence uses runtime availability checks (iOS 26+ and an eligible, ready model); Vision guidance works without it.
 
@@ -14,12 +14,12 @@ Read [REPAIR-NOTES.md](REPAIR-NOTES.md) for established defects, the source-grou
 - Flash On fires during capture. The flashlight button controls continuous LED illumination. Torch shuts down before camera switching, backgrounding or AR handoff.
 - RAW/ProRAW appears only when the active output supports it. HEIF falls back to JPEG if HEVC is unavailable.
 - 3:4, 4:5, square and 9:16 export crops preserve the original.
-- Guide uses local Vision detection/tracking and corrected camera-motion cues. Select allows drawing a region, moving it and resizing its lower-right corner. The shutter outline turns yellow near a thirds alignment with a level horizon.
-- Optional Apple Intelligence wording is requested with the refresh button; photo pixels are not sent to the language model.
+- Tap GUIDE for the dedicated guided viewfinder. See [GUIDED-SHOOTING.md](GUIDED-SHOOTING.md) for the shooting flow, anchoring, intent settings and capture safeguards.
+- In Settings, choose a composition style or enter a short photographic preference. Optional Apple Intelligence interprets that preference once; it never blocks the shutter or receives camera frames.
 
 ## Develop and keep
 
-Captures are saved in Still's private library before the editor opens. Import uses the system Photos picker. The library retains original bytes, a paired DNG where captured, metadata, thumbnails and separate edit recipes.
+Captures are saved in Still's private library. By default the camera stays open; enable Review after each photo in Settings to open the editor automatically. Import uses the system Photos picker. The library retains original bytes, a paired DNG where captured, metadata, thumbnails and separate edit recipes.
 
 The editor provides original looks, tonal adjustments, white balance, six-channel HSL, split grading, tone curves, RGB calibration, texture/optical effects, crop, borders and a capture-date stamp. Halation is a bloom approximation. Paper is a border tone rather than a paper-texture simulation.
 
@@ -35,7 +35,7 @@ Push changes to the existing repository or run **Build unsigned Still iOS IPA** 
 
 1. Selects the newest installed stable Xcode on macos-latest and generates the project using XcodeGen.
 2. Archives for physical iOS with signing disabled and records a build result bundle.
-3. Runs camera-state, zoom, crop, edit-persistence and image-export tests on an available iPhone simulator.
+3. Runs camera-state, zoom, crop, edit-persistence, image-export, composition-planning and automatic-capture-gate tests on an available iPhone simulator.
 4. Launches the simulator app and captures a screenshot. A simulator cannot verify physical camera features.
 5. Packages Payload/Still.app into StillCamera-unsigned.ipa and uploads it with BuildInfo.txt. Logs, result bundles and screenshot are uploaded separately, including when a build fails.
 

@@ -1,5 +1,7 @@
 # Still 1.1 — repair and device verification
 
+The guide was subsequently replaced in Still 1.2. See [GUIDED-SHOOTING.md](GUIDED-SHOOTING.md) for its current behavior and limitations. The repair findings below describe the earlier camera repair.
+
 Primary device requested: **iPhone 17 Pro Max, iOS 27.0**. Minimum OS remains iOS 18. The CI runner selects the newest installed stable Xcode and records its actual SDK in BuildInfo.txt. An older SDK can build an app that runs on newer iOS, but that is not physical-device verification.
 
 ## Defects established from source

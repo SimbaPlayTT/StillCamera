@@ -98,9 +98,19 @@ final class GuidedCaptureTests: XCTestCase {
 
     func testInvalidMeasurementsCannotTriggerCapture() {
         var gate = GuideCaptureGate()
-        let result = gate.update(time: .nan, point: CGPoint(x: .infinity, y: 0.5), trusted: true, level: 0, ready: true)
+        let result = gate.update(time: .nan, point: CGPoint(x: CGFloat.infinity, y: 0.5), trusted: true, level: 0, ready: true)
         XCTAssertFalse(result.fire); XCTAssertEqual(result.progress, 0)
         XCTAssertEqual(GuidePlanner.zoomToFill(.zero), 1)
+    }
+
+    func testMovingTowardTargetCannotTriggerCaptureWithCenteredCrosshair() {
+        var gate = GuideCaptureGate()
+        for index in 0...30 {
+            let result = gate.update(time: Double(index) * 0.1, point: CGPoint(x: 0.5, y: 0.5),
+                trusted: true, level: 0, ready: true, scale: CGFloat(pow(1.05, Double(index))))
+            XCTAssertFalse(result.fire)
+        }
+        XCTAssertFalse(gate.fired)
     }
 
     func testGuidedZoomIsCappedAndCenterRemainsFixed() {

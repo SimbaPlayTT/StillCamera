@@ -24,7 +24,7 @@ struct GuideIntent {
     init(style: GuideStyle, prompt: String = "") {
         self.style = style
         self.prompt = String(prompt.prefix(240))
-        let text = prompt.lowercased()
+        let text = self.prompt.lowercased()
         if text.contains("instagram") || text.contains("social post") { self.style = .instagram }
         if text.contains("portrait") || text.contains("headshot") { self.style = .portrait }
         if text.contains("architecture") || text.contains("building") { self.style = .architecture }
@@ -38,7 +38,7 @@ struct GuideIntent {
 }
 
 struct GuideSubject {
-    enum Kind { case face, person, salient, geometry }
+    enum Kind: Equatable { case face, person, salient, geometry }
     let bounds: CGRect
     let confidence: Float
     let kind: Kind
@@ -67,9 +67,9 @@ enum GuidePlanner {
     /// A bounded crop search over faces, people, salient details and architectural edges.
     /// This is a composition heuristic, not an aesthetic quality guarantee.
     static func choose(subjects: [GuideSubject], imageAspect: CGFloat, intent: GuideIntent) -> GuidePlan? {
-        guard imageAspect > 0 else { return nil }
+        guard imageAspect.isFinite, imageAspect > 0 else { return nil }
         let usable = subjects.filter {
-            $0.confidence >= 0.45 && $0.bounds.width > 0.025 && $0.bounds.height > 0.025 &&
+            $0.confidence.isFinite && $0.confidence >= 0.45 && $0.bounds.width > 0.025 && $0.bounds.height > 0.025 &&
                 unit.contains($0.bounds) && $0.bounds.width * $0.bounds.height < 0.96
         }.prefix(12)
         let normalizedRatio = intent.aspect.ratio / imageAspect
@@ -163,17 +163,24 @@ struct GuideCaptureGate {
     private var began: TimeInterval?
     private var lastTime: TimeInterval?
     private var previous: CGPoint?
+    private var previousScale: CGFloat?
     mutating func reset() { self = GuideCaptureGate() }
 
     mutating func update(time: TimeInterval, point: CGPoint, trusted: Bool, level: CGFloat,
-                         ready: Bool, dwell: TimeInterval = 0.8) -> (progress: Double, fire: Bool) {
-        defer { lastTime = time; previous = point }
+                         ready: Bool, dwell: TimeInterval = 0.8, scale: CGFloat = 1) -> (progress: Double, fire: Bool) {
+        defer { lastTime = time; previous = point; previousScale = scale }
         guard !fired, time.isFinite, point.x.isFinite, point.y.isFinite, trusted, ready,
+              scale.isFinite, scale > 0,
               abs(point.x - 0.5) < 0.045, abs(point.y - 0.5) < 0.045, abs(level) < 0.055 else {
             began = nil; return (0, false)
         }
         if let lastTime, time <= lastTime || time - lastTime > 0.35 { began = nil }
-        if let previous, hypot(point.x - previous.x, point.y - previous.y) > 0.014 { began = nil }
+        if let previous, let lastTime, time > lastTime {
+            let elapsed = CGFloat(max(time - lastTime, 0.01))
+            if hypot(point.x - previous.x, point.y - previous.y) / elapsed > 0.2 { began = nil }
+            if let previousScale, previousScale > 0,
+               abs(log(scale / previousScale)) / elapsed > 0.22 { began = nil }
+        }
         if began == nil { began = time }
         let progress = min(max((time - (began ?? time)) / max(dwell, 0.4), 0), 1)
         if progress >= 1 { fired = true; return (1, true) }

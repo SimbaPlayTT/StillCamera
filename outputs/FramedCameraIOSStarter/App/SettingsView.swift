@@ -93,8 +93,9 @@ struct SettingsView: View {
                 .disabled(!GuideSession.worldTrackingAvailable)
             LabeledContent("Scene anchoring", value: GuideSession.worldTrackingAvailable ? "Available" : "Visual fallback")
                 .font(.footnote).foregroundStyle(.secondary)
+            NavigationLink("How guided shooting works") { GuideHelpView() }
         } header: { Text("Guided shooting") } footer: {
-            Text("Tap Guide to scan. Match the white + to the yellow target. Automatic capture takes one photo after a steady hold. LiDAR keeps stationary scene details fixed in space. Without reliable depth, visual tracking follows the selected detail. RAW uses visual tracking. LiDAR mode uses the wide camera and a high-resolution JPEG crop up to 2×; flash and the regular photo timer are used in Photo mode.")
+            Text("Match the white + to the yellow target. Hold steady for one automatic photo per scan.")
         }
     }
 
@@ -151,6 +152,25 @@ struct SettingsView: View {
         case .unsupportedLanguage: return "This iPhone language is not supported by the model."
         case .unavailable: return "The model is unavailable. Local framing is available."
         }
+    }
+}
+
+private struct GuideHelpView: View {
+    var body: some View {
+        List {
+            Section("Choose a frame") {
+                Text("Tap Guide to find a composition. Use the rescan menu to choose a new frame or draw around a detail yourself.")
+            }
+            Section("Align and shoot") {
+                Text("Move the phone until the white + meets the yellow target. The guide sets the framing and waits for a steady hold. Turn Auto off to press the shutter yourself.")
+            }
+            Section("Scene anchoring") {
+                Text("LiDAR keeps stationary scene details fixed in space. When depth is unavailable, visual tracking follows the selected detail. If tracking is lost, rescan before shooting.")
+            }
+            Section("Capture options") {
+                Text("LiDAR mode uses the wide camera and a high-resolution JPEG crop up to 2×. RAW uses visual tracking. Flash, the flashlight, the regular timer and manual exposure are available in Photo mode.")
+            }
+        }.navigationTitle("Guided shooting").navigationBarTitleDisplayMode(.inline)
     }
 }
 

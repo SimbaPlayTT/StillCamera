@@ -55,7 +55,9 @@ struct GuidedCameraView: View {
         .interactiveDismissDisabled()
         .onDisappear { model.stop() }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active && !closing { close() }
+            if phase != .active && !closing {
+                closing = true; model.stop(completion: onClose)
+            }
         }
         .onChange(of: autoCapture) { _, value in model.setAutoCapture(value) }
         .onChange(of: model.photo?.id) { _, id in
@@ -92,7 +94,7 @@ struct GuidedCameraView: View {
         ZStack {
             Group {
                 if model.usesWorldCamera {
-                    WorldCameraPreview(session: model.arSession)
+                    WorldCameraPreview(model: model)
                         .scaleEffect(model.snapshot.zoom)
                         .animation(.easeOut(duration: 0.12), value: model.snapshot.zoom)
                 } else {
@@ -105,6 +107,7 @@ struct GuidedCameraView: View {
                 .allowsHitTesting(false)
             if selectionMode {
                 Color.clear.contentShape(Rectangle())
+                    .allowsHitTesting(model.snapshot.phase != .framing)
                     .gesture(DragGesture(minimumDistance: 5).onChanged { value in
                         dragStart = value.startLocation
                         selection = normalizedRect(from: value.startLocation, to: value.location, size: size)
@@ -163,7 +166,7 @@ struct GuidedCameraView: View {
                 Menu {
                     Button("Find a new frame", systemImage: "arrow.clockwise") { selectionMode = false; model.rescan() }
                     Button("Select a detail", systemImage: "crop") {
-                        model.rescan(); selectionMode = true
+                        model.rescan(selectDetail: true); selectionMode = true
                     }
                 } label: {
                     Image(systemName: selectionMode ? "crop" : "arrow.clockwise").font(.title3).frame(width: 52, height: 52)
@@ -212,10 +215,10 @@ struct GuidedCameraView: View {
 }
 
 private struct WorldCameraPreview: UIViewRepresentable {
-    let session: ARSession
+    let model: GuideSession
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView()
-        view.session = session; view.scene = SCNScene()
+        model.attachPreview(view); view.scene = SCNScene()
         view.preferredFramesPerSecond = 60; view.antialiasingMode = .none
         view.automaticallyUpdatesLighting = false; view.isUserInteractionEnabled = false
         return view

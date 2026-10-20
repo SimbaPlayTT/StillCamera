@@ -1,4 +1,30 @@
 import SwiftUI
++
+private struct FilmLookThumbnail: View {
+    let entry: LibraryPhoto
+    let name: String
+    let selected: Bool
+    @State private var image: UIImage?
+    var body: some View {
+        VStack(spacing: 7) {
+            ZStack {
+                Color.white.opacity(0.06)
+                if let image { Image(uiImage: image).resizable().scaledToFill() }
+                else { ProgressView().controlSize(.small) }
+            }
+            .frame(width: 74, height: 100).clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(selected ? .yellow : .clear, lineWidth: 1.5))
+            Text(name.uppercased()).font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(selected ? .yellow : .secondary)
+        }
+        .task(id: entry.id.uuidString + name + entry.recipe.aspect.rawValue) {
+            do { image = try await PhotoRenderer.shared.lookThumbnail(entry, look: name) }
+            catch is CancellationError {} catch { image = UIImage(contentsOfFile: entry.thumbnailURL.path) }
+        }
+    }
+}
+
 
 struct PhotoEditorView: View {
     @Environment(\.dismiss) private var dismiss
@@ -105,12 +131,17 @@ struct PhotoEditorView: View {
         switch category {
         case "Looks":
             VStack(alignment: .leading, spacing: 15) {
-                Text("Start with a look, then adjust it.").font(.footnote).foregroundStyle(.secondary)
-                ForEach(PhotoRenderer.looks, id: \.self) { name in
-                    Button { recipe.look = name } label: {
-                        HStack { Text(name); Spacer(); if recipe.look == name { Image(systemName: "checkmark") } }.frame(minHeight: 36)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(PhotoRenderer.looks, id: \.self) { name in
+                            Button { recipe.look = name } label: {
+                                FilmLookThumbnail(entry: entry, name: name, selected: recipe.look == name)
+                            }.buttonStyle(.plain).accessibilityLabel("\(name) look")
+                                .accessibilityAddTraits(recipe.look == name ? .isSelected : [])
+                        }
                     }
                 }
+                Text("Original files stay untouched.").font(.caption).foregroundStyle(.secondary)
             }
         case "Light":
             VStack { adjustment("Exposure", "exposure", -2...2); adjustment("Contrast", "contrast"); adjustment("Highlights", "highlights"); adjustment("Shadows", "shadows"); adjustment("Whites", "whites"); adjustment("Blacks", "blacks"); adjustment("Fade", "fade", 0...1) }

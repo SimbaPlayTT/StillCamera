@@ -47,12 +47,16 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
     private var plan: GuidePlan?
     private var corners: [SIMD3<Float>] = []
     private var worldAnchor: ARAnchor?
+    private var anchorCorners: [SIMD3<Float>] = []
+    private var anchorSubject: SIMD3<Float>?
+    private var worldSubject: SIMD3<Float>?
     private var trackingBox: CGRect?
     private var scanPending = true
     private var manualRegion: CGRect?
     private var lost = false
     private var gate = GuideCaptureGate()
     private var shotPending = false
+    private var captureTicket: UUID?
     private var zoomPrepared = false
     private var zooming = false
     private var zoom: CGFloat = 1
@@ -61,6 +65,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
     private var lastFrame: CFTimeInterval = 0
     private var lastProcessed: CFTimeInterval = 0
     private var roll: CGFloat = 0
+    private var deviceSteady = true
     private var autoCapture: Bool
     private let autoZoom: Bool
     private let dwell: Double
@@ -83,7 +88,8 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         camera.$capturedPhoto.compactMap { $0 }.sink { [weak self] photo in
             guard let self else { return }
             self.queue.async {
-                guard self.running, self.shotPending else { return }
+                guard self.running, self.shotPending, self.captureTicket != nil else { return }
+                self.captureTicket = nil
                 DispatchQueue.main.async { self.photo = photo }
             }
         }.store(in: &subscriptions)
@@ -91,10 +97,17 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
             self?.queue.async { self?.fail(message) }
         }.store(in: &subscriptions)
         camera.$horizonAngle.sink { [weak self] value in self?.queue.async { self?.roll = value } }.store(in: &subscriptions)
+        camera.$isDeviceSteady.sink { [weak self] value in self?.queue.async { self?.deviceSteady = value } }.store(in: &subscriptions)
         camera.$currentZoomFactor.sink { [weak self] value in self?.queue.async { self?.fallbackZoom = value } }.store(in: &subscriptions)
     }
 
     deinit { motion.stopDeviceMotionUpdates() }
+
+    func attachPreview(_ view: ARSCNView) {
+        view.session = arSession
+        arSession.delegate = self
+        arSession.delegateQueue = frameQueue
+    }
 
     func start(viewport: CGSize) {
         guard viewport.width > 0, viewport.height > 0 else { return }
@@ -110,6 +123,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
                 }
                 let configuration = ARWorldTrackingConfiguration()
                 configuration.videoFormat = format
+                configuration.isAutoFocusEnabled = true
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
                     configuration.frameSemantics = .smoothedSceneDepth
                 } else { configuration.frameSemantics = .sceneDepth }
@@ -135,7 +149,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    func rescan(style: GuideStyle? = nil) {
+    func rescan(style: GuideStyle? = nil, selectDetail: Bool = false) {
         queue.async {
             guard self.running, !self.shotPending, !self.zooming else { return }
             if let style {
@@ -143,17 +157,21 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
                 DispatchQueue.main.async { self.aspect = self.intent.aspect }
             }
             self.resetPlan(); self.manualRegion = nil
+            let instruction = selectDetail ? "Draw around a detail" : "Finding a new frame"
+            let detail = selectDetail ? "Release to lock your selection" : "The previous target has been released"
             if !self.usesWorldCamera && abs(self.fallbackZoom - 1) > 0.05 {
                 self.zooming = true
                 let token = self.generation
                 self.camera.rampGuidedZoom(to: 1) { [weak self] _, _ in
                     self?.queue.async {
                         guard let self, self.running, self.generation == token else { return }
-                        self.zooming = false; self.scanPending = true
+                        self.zooming = false; self.scanPending = !selectDetail
+                        self.publish(selectDetail ? .empty : .scanning, instruction, detail: detail)
                     }
                 }
-            } else { self.scanPending = true }
-            self.publish(.scanning, "Finding a new frame", detail: "The previous target has been released")
+            } else { self.scanPending = !selectDetail }
+            self.publish(self.zooming ? .framing : selectDetail ? .empty : .scanning,
+                self.zooming ? "Resetting zoom" : instruction, detail: detail)
         }
     }
 
@@ -184,7 +202,8 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
 
     private func resetPlan() {
         if let worldAnchor { arSession.remove(anchor: worldAnchor) }
-        worldAnchor = nil; corners = []; plan = nil; trackingBox = nil
+        worldAnchor = nil; corners = []; anchorCorners = []; anchorSubject = nil; worldSubject = nil
+        captureTicket = nil; plan = nil; trackingBox = nil
         gate.reset(); lost = false; zoomPrepared = false; zooming = false
         zoom = 1; desiredZoom = 1; lastProcessed = 0
     }
@@ -211,7 +230,8 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         lastFrame = now
         let thermal = ProcessInfo.processInfo.thermalState
         if thermal == .critical { gate.reset(); publish(.lost, "Let your iPhone cool down", detail: "Capture is paused"); return }
-        let interval: Double = thermal == .serious || ProcessInfo.processInfo.isLowPowerModeEnabled ? 0.14 : 0.085
+        let constrained = thermal == .serious || ProcessInfo.processInfo.isLowPowerModeEnabled
+        let interval: Double = constrained ? 0.14 : corners.count == 4 ? 1 / 30 : 0.05
         guard now - lastProcessed >= interval, !zooming else { return }
         lastProcessed = now
         autoreleasepool {
@@ -233,24 +253,38 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
                     }
                     plan = selected; trackingBox = selected.subject.bounds
                     vision.lock(selected.subject.bounds)
-                    if let arFrame { anchor(selected.crop, frame: arFrame) }
+                    if let arFrame { anchor(selected.crop, subject: selected.subject.bounds, frame: arFrame) }
                 }
                 guard let plan, !lost else { return }
                 let points: [CGPoint]
                 var trusted = true
                 if let arFrame, corners.count == 4 {
+                    if let anchor = worldAnchor {
+                        let pose = arFrame.anchors.first(where: { $0.identifier == anchor.identifier })?.transform ?? anchor.transform
+                        corners = anchorCorners.map { point in
+                            let value = pose * SIMD4<Float>(point, 1)
+                            return SIMD3<Float>(value.x, value.y, value.z)
+                        }
+                        if let anchorSubject {
+                            let value = pose * SIMD4<Float>(anchorSubject, 1)
+                            worldSubject = SIMD3<Float>(value.x, value.y, value.z)
+                        }
+                    }
                     let inverse = simd_inverse(arFrame.camera.transform)
                     trusted = corners.allSatisfy { (inverse * SIMD4<Float>($0, 1)).z < -0.05 }
                     points = corners.map {
                         let p = arFrame.camera.projectPoint($0, orientation: .portrait, viewportSize: viewport)
                         return CGPoint(x: p.x / viewport.width, y: p.y / viewport.height)
                     }
-                    let center = midpoint(points)
                     // A nearer occluder must never trigger a photo of a different subject.
-                    if let observed = depth(at: center, frame: arFrame), let worldCenter = worldCenter {
-                        let local = inverse * SIMD4<Float>(worldCenter, 1)
+                    if let worldSubject {
+                        let projected = arFrame.camera.projectPoint(worldSubject, orientation: .portrait, viewportSize: viewport)
+                        let point = CGPoint(x: projected.x / viewport.width, y: projected.y / viewport.height)
+                        let local = inverse * SIMD4<Float>(worldSubject, 1)
                         let expected = -local.z
-                        if expected - observed > max(0.35, expected * 0.2) { trusted = false }
+                        if let observed = depth(at: point, frame: arFrame) {
+                            if expected - observed > max(0.35, expected * 0.2) { trusted = false }
+                        } else { trusted = false }
                     }
                 } else {
                     guard let upright = vision.upright(buffer, orientation: orientation) else { return }
@@ -285,7 +319,8 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
                     hardwareReady = !device.isAdjustingFocus && !device.isAdjustingExposure
                 } else { hardwareReady = true }
                 let result = gate.update(time: now, point: target, trusted: trusted, level: roll,
-                    ready: hardwareReady && !framing && (!autoZoom || zoomPrepared), dwell: dwell)
+                    ready: hardwareReady && deviceSteady && !framing && (!autoZoom || zoomPrepared), dwell: dwell,
+                    scale: sqrt(max(0, bounds.width * bounds.height)))
                 let cue = !trusted ? "Keep the target in sight" : framing ? "Setting the frame" :
                     result.progress > 0 ? (autoCapture ? "Hold steady · taking photo" : "Ready to shoot") :
                     GuidePlanner.instruction(target: target, level: roll)
@@ -298,16 +333,12 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    private var worldCenter: SIMD3<Float>? {
-        guard corners.count == 4 else { return nil }
-        return corners.reduce(SIMD3<Float>(repeating: 0), +) / 4
-    }
-
-    private func anchor(_ crop: CGRect, frame: ARFrame) {
+    private func anchor(_ crop: CGRect, subject: CGRect, frame: ARFrame) {
         let pixels = CameraMath.viewRect(crop, imageSize: imageSize, viewSize: viewport)
         let rect = CGRect(x: pixels.minX / viewport.width, y: pixels.minY / viewport.height,
                           width: pixels.width / viewport.width, height: pixels.height / viewport.height)
-        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let subjectPixels = CameraMath.viewRect(subject, imageSize: imageSize, viewSize: viewport)
+        let center = CGPoint(x: subjectPixels.midX / viewport.width, y: subjectPixels.midY / viewport.height)
         guard let distance = depth(at: center, frame: frame) else { return } // Honest visual fallback on distant/unmapped surfaces.
         var plane = frame.camera.transform
         let position = SIMD3<Float>(plane.columns.3.x, plane.columns.3.y, plane.columns.3.z)
@@ -320,6 +351,17 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         }
         guard unprojected.count == 4, unprojected.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else { return }
         corners = unprojected
+        let inverse = simd_inverse(plane)
+        anchorCorners = unprojected.map { point in
+            let value = inverse * SIMD4<Float>(point, 1)
+            return SIMD3<Float>(value.x, value.y, value.z)
+        }
+        worldSubject = frame.camera.unprojectPoint(CGPoint(x: center.x * viewport.width, y: center.y * viewport.height),
+            ontoPlane: plane, orientation: .portrait, viewportSize: viewport)
+        if let worldSubject {
+            let value = inverse * SIMD4<Float>(worldSubject, 1)
+            anchorSubject = SIMD3<Float>(value.x, value.y, value.z)
+        }
         let anchor = ARAnchor(name: "Still composition", transform: plane)
         worldAnchor = anchor; arSession.add(anchor: anchor)
     }
@@ -382,17 +424,19 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
     private func takePhoto(automatic: Bool) {
         guard running, !shotPending, !lost, !zooming, let plan else { return }
         shotPending = true
-        let token = generation
+        let token = generation, ticket = UUID()
+        captureTicket = ticket
         publish(.capturing, "Taking photo", detail: "One photo per scan")
         if usesWorldCamera {
             let cropZoom = zoom
             arSession.captureHighResolutionFrame { [weak self] frame, error in
                 guard let self else { return }
                 self.queue.async {
-                    guard self.running, token == self.generation else { return }
+                    guard self.running, token == self.generation, self.captureTicket == ticket else { return }
                     guard let frame, error == nil else { self.fail(error?.localizedDescription ?? "Could not capture this frame. Rescan to retry."); return }
                     do {
                         let result = try self.makePhoto(frame, aspect: plan.aspect, zoom: cropZoom)
+                        self.captureTicket = nil
                         DispatchQueue.main.async { self.photo = result }
                     } catch { self.fail(error.localizedDescription) }
                 }
@@ -400,9 +444,9 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         } else {
             camera.checkGuidedReadiness { [weak self] ready in
                 self?.queue.async {
-                    guard let self, self.running, token == self.generation else { return }
+                    guard let self, self.running, token == self.generation, self.captureTicket == ticket else { return }
                     guard ready else {
-                        self.shotPending = false; self.gate.reset()
+                        self.shotPending = false; self.captureTicket = nil; self.gate.reset()
                         self.publish(.locked, "Let the camera settle", detail: plan.title); return
                     }
                     self.camera.capturePhoto(format: self.captureFormat, preferProRAW: self.preferProRAW,
@@ -411,7 +455,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
             }
         }
         queue.asyncAfter(deadline: .now() + 32) { [weak self] in
-            guard let self, self.running, token == self.generation, self.shotPending else { return }
+            guard let self, self.running, token == self.generation, self.shotPending, self.captureTicket == ticket else { return }
             self.fail("Capture timed out. Close Guide and try again.")
         }
     }
@@ -425,8 +469,11 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         guard let cg = imageContext.createCGImage(image, from: image.extent) else { throw GuideError.encoding }
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { throw GuideError.encoding }
+        var exif = frame.exifData
+        exif[kCGImagePropertyExifPixelXDimension as String] = cg.width
+        exif[kCGImagePropertyExifPixelYDimension as String] = cg.height
         let properties: [String: Any] = [kCGImageDestinationLossyCompressionQuality as String: 0.96,
-            kCGImagePropertyOrientation as String: 1, kCGImagePropertyExifDictionary as String: frame.exifData]
+            kCGImagePropertyOrientation as String: 1, kCGImagePropertyExifDictionary as String: exif]
         CGImageDestinationAddImage(destination, cg, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw GuideError.encoding }
         var metadata = PhotoMetadata()
@@ -444,7 +491,7 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
 
     private func fail(_ message: String) {
         guard running else { return }
-        shotPending = false; lost = true; gate.reset()
+        shotPending = false; captureTicket = nil; lost = true; gate.reset()
         publish(.failed, "Guide paused", detail: message)
         CameraDiagnostics.shared.record("Guide: \(message)")
     }
@@ -474,7 +521,10 @@ final class GuideSession: NSObject, ObservableObject, ARSessionDelegate {
         motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
             guard let data else { return }
             let angle = CGFloat(atan2(data.gravity.x, -data.gravity.y))
-            self?.queue.async { self?.roll = angle }
+            let r = data.rotationRate, a = data.userAcceleration
+            let steady = r.x * r.x + r.y * r.y + r.z * r.z < 0.0144 &&
+                a.x * a.x + a.y * a.y + a.z * a.z < 0.0064
+            self?.queue.async { self?.roll = angle; self?.deviceSteady = steady }
         }
     }
 
